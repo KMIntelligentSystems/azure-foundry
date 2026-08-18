@@ -1,0 +1,33 @@
+{
+  "name": "azure-foundry",
+  "version": "1.0.0",
+  "description": "TypeScript project using the Azure AI Foundry SDK (@azure/ai-projects)",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "sample:streaming": "tsx src/samples/streaming.ts",
+    "sample:agent": "tsx src/samples/agent.ts"
+  },
+  "keywords": [
+    "azure",
+    "ai-foundry",
+    "typescript"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@azure/ai-projects": "^2.4.0",
+    "@azure/arm-appcontainers": "^3.0.0",
+    "@azure/identity": "^4.13.1",
+    "dotenv": "^17.4.2",
+    "openai": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
