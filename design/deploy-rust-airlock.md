@@ -97,6 +97,21 @@ CPU 60 s, NPROC 1, NOFILE 16. Worth knowing:
 
 ## 3. Repointing the oracle at Foundry
 
+> **Status: implemented 2026-08-18 (image 1.0.3).** `gpt-4o-mini` was deprecated —
+> deployed **`gpt-4.1-mini`** (2025-04-14) instead; `config.toml [models]` allowlist
+> carries that deployment name. §3.1 landed in `oracle/src/llm.ts` + `schemas.ts`
+> (flat `strict:true` catalog — note strict mode requires *all* properties in
+> `required` with nullable optionals, recursively; and `max_output_tokens` must fit a
+> full inline `store_dataset` payload — 800 truncated arguments mid-JSON). §3.2 landed
+> in `lockdown.rs`: the airlock mints an Entra token via the 'Daemon' SP
+> (`https://ai.azure.com/.default` audience; `cognitiveservices.azure.com` is rejected
+> with 401) and injects `FOUNDRY_ACCESS_TOKEN` + `AZURE_AI_PROJECT_ENDPOINT`.
+> RBAC gotcha: the data plane honors **Foundry User at ACCOUNT scope** —
+> project-scope assignment 403'd. Validated locally: full `run-oracle` loop against
+> Foundry, census 2026-06, status=stored, $0.0042. Cost constants now Azure prices
+> ($0.40/$1.60 per 1M for gpt-4.1-mini). serve-http still runs the scripted runner —
+> wiring the LLM oracle into the HTTP service is the separate Phase-3 step.
+
 ### 3.1 The call
 
 `oracle/src/llm.ts` `chatCompletion()` hits
@@ -219,13 +234,55 @@ job is a fresh process that fires once by construction. **This is the main reaso
 ACA Jobs over keeping `--schedule`** — the alternative is adding a durable `fired` table,
 which is real work for no gain.
 
+## 4.5 Topology decision (2026-08-18): separate ACA environments, one RG
+
+The target daemon (refresh-daemon, N1) gets its **own ACA environment**
+(`target-env`) inside the same resource group (`nowcasting`) — network separation
+between the source zone and target zone, while keeping one management/lifecycle
+boundary. Consequences: in-env DNS does NOT cross environments, so both apps use
+their external FQDNs for each other (TLS + HMAC as always); `DAEMON_MAIN_URL` /
+`DAEMON_URL` carry full FQDNs, not short names. Chosen deliberately for a learning
+deployment: the environment is the network boundary in ACA, not the resource group.
+
+> **N1 status: implemented 2026-08-18 (image daemon-refresh:0.1.0).** refresh-daemon
+> runs in `target-env` (external ingress :8792, refresh.db on the `refresh-data`
+> share, Python 3.11 + pinned numpy/pandas/statsmodels for the frozen skills,
+> PYTHON_BIN=python3). Code changes: openDb() opens `file:...?nolock=1` and drops
+> WAL (single long-lived connection, sole writer — the CIFS locking lesson from §5).
+> Verified end-to-end across the two environments: wake-census-shipments → fetch →
+> store ds-9b4c5eb7 → broadcast bc-ad7a2538 → outbox retry→accept → target verify/
+> ingest (16 obs m3_total_shipments_nsa) → 3 contracts fan-out (m3-forecast, m3-stl,
+> productivity) → all abstained CORRECTLY (insufficient history — the Azure
+> refresh.db lacks the backbone; sync it via /refresh/bootstrap for real candidates).
+> Gotchas: az acr build on Windows doesn't reliably honor .dockerignore — build from
+> a staged context (http_proxy/.build-refresh); pnpm project needs a generated
+> package-lock.json for npm ci.
+>
+> **History bootstrap (2026-08-19):** ACA Job `bridge-seed` (manual trigger,
+> `daemon-bridge-seed:0.1.0`, Node-only image, snapshot of artifacts.db baked in,
+> `REFRESH_DAEMON_URL=http://refresh-daemon` in-env) seeded 3,730 observations /
+> 13 series / 2002-01..2026-07 into the Azure refresh.db. Next wake-census-shipments
+> run: all 3 contracts reached **candidate** (run_nowcast_skill ok=true,
+> write_forecast_artifact ok=true). Re-run the job whenever the backbone snapshot
+> needs refreshing.
+
 ## 5. State
 
 `sandbox.db` holds `datasets` (pulled by the target via `GET /datasets/:id`) and
 `broadcast_outbox` (undelivered broadcasts). Both must survive restarts.
 
-Mount **Azure Files** at `/data` and keep SQLite. With `maxReplicas: 1` this is correct and
-needs zero code change.
+Mount **Azure Files** at `/data` and keep SQLite. With `maxReplicas: 1` this is correct.
+~~needs zero code change~~ **Correction (2026-08-18, first deploy):** SQLite's POSIX
+byte-range lock protocol **does not work at all** on ACA's Azure Files (CIFS) mount —
+every writer gets permanent `SQLITE_BUSY`, verified on a brand-new file with zero open
+server-side handles (busy_timeout and locking_mode=EXCLUSIVE both failed). Final fix:
+every connection opens with `nolock=1` (`tools::open_db`) and all DB access is
+serialized in-process behind a global mutex (`tools::DB_LOCK`) — held for a job's
+lifetime, per dispatcher iteration (bounded by the 30 s ureq timeout), and per
+`/datasets` pull. Safe because `maxReplicas: 1` guarantees one process on the file and
+ACA Jobs never mount `/data`. **Deploy-order caveat:** `az containerapp update`
+overlaps old+new replicas briefly — with `nolock` that's a two-writer window. Scale to
+0 before updating the app image, then back to 1.
 
 Do not reach for Postgres here. The single-replica constraint comes from the outbox claim
 and the connection model, not from SQLite, so a bigger database buys nothing until those are

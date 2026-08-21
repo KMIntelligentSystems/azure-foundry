@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Code-first Foundry hosted agent (Invocations protocol, hand-rolled).
+# Build context: c:/repos/azure-foundry
+#   az acr build -r daemonairlock -t foundry-agent-hello:0.1.0 -f Dockerfile.agent .
+
+FROM node:24-bookworm AS build
+WORKDIR /src
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npx tsc
+
+FROM node:24-bookworm
+WORKDIR /app
+# Python for the statistician's execute_python tool (chunk 4).
+# NOTE: bookworm ships 3.11; numeric env pinned as in Dockerfile.refresh.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --break-system-packages --no-cache-dir \
+      numpy==1.26.4 pandas==2.2.2 statsmodels==0.14.6 scikit-learn==1.5.2
+COPY --from=build /src/dist ./dist
+COPY --from=build /src/node_modules ./node_modules
+# Chromium for the coder's render_validate tool (chunk 5). Installs the browser
+# + system deps under the default PLAYWRIGHT_BROWSERS_PATH (root: /root/.cache).
+RUN npx playwright install --with-deps chromium
+ENV PORT=8088 PYTHON_BIN=python3
+EXPOSE 8088
+CMD ["node", "dist/hosted-agent/server.js"]
