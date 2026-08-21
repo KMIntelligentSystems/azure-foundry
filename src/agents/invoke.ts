@@ -15,6 +15,8 @@ const projectEndpoint =
   process.env["AZURE_AI_PROJECT_ENDPOINT"] ??
   "https://forecastingmodule.services.ai.azure.com/api/projects/proj-default";
 const agentName = process.env["AGENT_NAME"] ?? "hello-hosted";
+const promptText =
+  process.env["PROMPT"] ?? "In one sentence: what does this container prove?";
 
 const project = new AIProjectClient(projectEndpoint, new DefaultAzureCredential());
 
@@ -39,7 +41,7 @@ try {
     new DefaultAzureCredential(),
     "https://ai.azure.com/.default",
   );
-  const url = `${projectEndpoint}/agents/${agentName}/endpoint/protocols/invocations`;
+  const url = `${projectEndpoint}/agents/${agentName}/endpoint/protocols/invocations?api-version=2025-11-15-preview`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -48,7 +50,8 @@ try {
     },
     body: JSON.stringify({
       agent_session_id: sessionId,
-      input: "In one sentence, what does this container prove?",
+      conversation_id: `hosted-${sessionId.slice(0, 12)}`,
+      promptText,
     }),
   });
   console.log(`HTTP ${res.status}`);
