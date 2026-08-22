@@ -38,7 +38,7 @@ export interface OrchestratorResult {
 
 const MAX_STEP_OUTPUT_CHARS = 6_000;
 
-async function executeStep(step: PlanStep, upstream: StepResult[], conversationId: string): Promise<StepResult> {
+async function executeStep(step: PlanStep, upstream: StepResult[], conversationId: string, userId?: string): Promise<StepResult> {
   const role = getRole(step.role);
   if (!role) throw new Error(`role '${step.role}' vanished after validation`);
   const upstreamText =
@@ -46,12 +46,12 @@ async function executeStep(step: PlanStep, upstream: StepResult[], conversationI
       ? "(no upstream results)"
       : upstream.map((u) => `--- ${u.role} ---\n${u.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`).join("\n");
   const actualDeployment = DEPLOYMENT_ALIAS[step.deployment] ?? step.deployment;
-  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId);
+  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, undefined, { userId });
   // Report the alias (what the plan asked for), not the mapped target.
   return { role: step.role, deployment: step.deployment, output: res.output, usage: res.usage };
 }
 
-export async function orchestrate(prompt: string, conversationId?: string): Promise<OrchestratorResult> {
+export async function orchestrate(prompt: string, conversationId?: string, userId?: string): Promise<OrchestratorResult> {
   const totals = { input: 0, output: 0 };
   const id = conversationId && conversationId.trim() ? conversationId : `anon-${Date.now()}`;
   const session = loadSession(id);
@@ -77,7 +77,7 @@ export async function orchestrate(prompt: string, conversationId?: string): Prom
   // Execute steps sequentially (chunk 1: simple chain; parallelism is a later decision)
   const steps: StepResult[] = [];
   for (const step of verdict.plan.steps) {
-    const r = await executeStep(step, steps, id);
+    const r = await executeStep(step, steps, id, userId);
     totals.input += r.usage.input;
     totals.output += r.usage.output;
     steps.push(r);

@@ -28,7 +28,7 @@ async function getToken(): Promise<string> {
 
 export async function invoke(req: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
-    const body = (await req.json()) as { conversation_id?: string; promptText?: string };
+    const body = (await req.json()) as { conversation_id?: string; promptText?: string; user_id?: string };
 
     if (!body.promptText) {
       return {
@@ -69,6 +69,7 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
           agent_session_id: sessionId,
           conversation_id: body.conversation_id,
           promptText: body.promptText,
+          user_id: body.user_id,
         }),
       });
 

@@ -70,6 +70,75 @@ function resolveInWorkspace(ws: string, rel: string): string | null {
   return p.startsWith(ws + path.sep) || p === ws ? p : null;
 }
 
+// ── save_artifact: upload workspace file to artifact service (chunk 7) ────
+//
+// The user's "save this to catalog X" prompt becomes a tool call here. The
+// broker reads the workspace file, uploads it to the artifact service
+// (which stores it and returns a URL), then saves the metadata.
+
+const ARTIFACT_SERVICE_URL =
+  process.env["ARTIFACT_SERVICE_URL"] ??
+  "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
+
+async function saveArtifactToCatalog(
+  args: Record<string, unknown>,
+  ws: string,
+  userId: string,
+): Promise<ToolResult> {
+  const path = String(args["path"] ?? "");
+  const category = String(args["category"] ?? "");
+  const subject = String(args["subject"] ?? "");
+  const title = String(args["title"] ?? path);
+  const tags = args["tags"] ? String(args["tags"]) : undefined;
+
+  if (!category || !subject) {
+    return err("invalid_args", "category and subject are required");
+  }
+
+  const fullPath = resolveInWorkspace(ws, path);
+  if (!fullPath) return err("path_escape", "path resolves outside the workspace");
+  if (!fs.existsSync(fullPath)) return err("not_found", `workspace file not found: ${path}`);
+
+  const content = fs.readFileSync(fullPath);
+  const mimeType = path.endsWith(".html") ? "text/html" : path.endsWith(".json") ? "application/json" : path.endsWith(".md") ? "text/markdown" : "application/octet-stream";
+
+  // Upload file content to artifact service (which stores it + returns URL)
+  try {
+    const uploadRes = await fetch(`${ARTIFACT_SERVICE_URL}/artifacts/upload`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-User-Id": userId,
+        "X-File-Name": path.split("/").pop() ?? "artifact",
+        "X-Mime-Type": mimeType,
+      },
+      body: content,
+    });
+    if (!uploadRes.ok) {
+      return err("upload_failed", `artifact service upload: HTTP ${uploadRes.status}`);
+    }
+    const { url } = (await uploadRes.json()) as { url: string };
+
+    // Save metadata to catalog
+    const saveRes = await fetch(`${ARTIFACT_SERVICE_URL}/artifacts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": userId,
+        "X-User-Role": "user", // orchestrator acts as the user who prompted
+      },
+      body: JSON.stringify({ category, subject, title, mimeType, url, tags }),
+    });
+    if (!saveRes.ok) {
+      return err("save_failed", `artifact service save: HTTP ${saveRes.status}`);
+    }
+    const saved = (await saveRes.json()) as { id: string };
+    return ok({ artifactId: saved.id, url, title, category, subject });
+  } catch (e) {
+    return err("network_error", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // ── execute_python: the one spawn the broker permits ──────────────────────
 //
 // Runs model-authored Python in a locked-down child (mirrors lockdown.rs):
@@ -167,7 +236,7 @@ async function renderValidate(htmlPath: string): Promise<ToolResult> {
 
 interface ToolDef {
   spec: ToolSpec;
-  run: (args: Record<string, unknown>, ws: string) => ToolResult | Promise<ToolResult>;
+  run: (args: Record<string, unknown>, ws: string, ctx?: { userId?: string }) => ToolResult | Promise<ToolResult>;
 }
 
 const CATALOG: Record<string, ToolDef> = {
@@ -233,6 +302,29 @@ const CATALOG: Record<string, ToolDef> = {
     },
     run: (a, ws) => runPython(String(a["code"] ?? ""), ws),
   },
+  save_artifact: {
+    spec: {
+      type: "function",
+      name: "save_artifact",
+      description:
+        "Save a workspace file to the user's artifact catalog. Uploads the file content and stores metadata. " +
+        "Use when the user asks to 'save this chart' or 'add to catalog'.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative path (e.g. charts/line.html)" },
+          category: { type: "string", description: "Catalog category (e.g. Economics, Psychology)" },
+          subject: { type: "string", description: "Catalog subject (e.g. M3 Manufacturing, Cognitive Tests)" },
+          title: { type: "string", description: "Display title (defaults to filename)" },
+          tags: { type: ["string", "null"], description: "Comma-separated tags (optional)" },
+        },
+        required: ["path", "category", "subject", "title", "tags"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, ws, ctx) => saveArtifactToCatalog(a, ws, ctx?.userId ?? "unknown"),
+  },
   render_validate: {
     spec: {
       type: "function",
@@ -292,9 +384,10 @@ export async function dispatch(
   args: Record<string, unknown>,
   allowed: readonly string[],
   ws: string,
+  ctx?: { userId?: string },
 ): Promise<ToolResult> {
   if (!allowed.includes(toolName)) return err("unknown_tool", `no such tool in this role's catalog: ${toolName}`);
-  return await CATALOG[toolName].run(args, ws);
+  return await CATALOG[toolName].run(args, ws, ctx);
 }
 
 // ── runRole — one step's tool loop ────────────────────────────────────────
@@ -313,6 +406,7 @@ export async function runRole(
   upstreamText: string,
   conversationId: string,
   budget?: Partial<StepBudget>,
+  ctx?: { userId?: string },
 ): Promise<RoleRunResult> {
   const b: StepBudget = {
     maxToolCalls: budget?.maxToolCalls ?? DEFAULT_BUDGET.maxToolCalls,
@@ -374,7 +468,7 @@ export async function runRole(
         terminatedBy = "finish";
         break;
       }
-      const tr = await dispatch(c.name, c.args, allowed, ws);
+      const tr = await dispatch(c.name, c.args, allowed, ws, ctx);
       input.push({
         type: "function_call_output",
         call_id: c.callId,

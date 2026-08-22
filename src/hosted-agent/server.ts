@@ -83,6 +83,7 @@ const server = http.createServer(async (req, res) => {
       const result = await orchestrate(
         prompt,
         typeof body?.["conversation_id"] === "string" ? (body["conversation_id"] as string) : undefined,
+        typeof body?.["user_id"] === "string" ? (body["user_id"] as string) : undefined,
       );
       res.writeHead(result.ok ? 200 : 422, { "Content-Type": "application/json" }).end(JSON.stringify({
         agent: "orchestrator (chunk 1-2)",

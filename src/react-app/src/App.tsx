@@ -121,7 +121,7 @@ function FoundryApp() {
       const res = await fetch("/api/invoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: conversationId, promptText: prompt }),
+        body: JSON.stringify({ conversation_id: conversationId, promptText: prompt, user_id: userId }),
       });
 
       if (!res.ok) {
@@ -189,42 +189,6 @@ function FoundryApp() {
   const handleSelectArtifact = (artifact: CatalogArtifact) => {
     setSelectedArtifact(artifact);
   };
-
-  const handleSaveArtifact = async () => {
-    if (!result || !userId) return;
-    // Save the first chart artifact (or prompt user to choose)
-    const chart = result.artifacts?.find((a) => a.kind === "chart");
-    if (!chart) {
-      setError("No chart artifact to save");
-      return;
-    }
-    // This is a stub — in production, upload the workspace file to a URL first
-    const artifact = {
-      category: "Economics",
-      subject: "M3 Manufacturing",
-      title: chart.path,
-      mimeType: "text/html",
-      url: `https://artifact-service.bravesea.../workspace/${chart.path}`, // placeholder
-    };
-    try {
-      const res = await fetch("https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io/artifacts", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Id": userId,
-          "X-User-Role": userRole,
-        },
-        body: JSON.stringify(artifact),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addThinking("status", "Saved to catalog", chart.path);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  // Wire up save button when result is shown
-  const showSaveButton = result && result.artifacts && result.artifacts.length > 0;
 
   if (!userId) {
     return (
@@ -445,23 +409,12 @@ function FoundryApp() {
               </pre>
             </div>
 
-            <div style={{ marginTop: "1rem", color: "#8b949e", fontSize: "0.8rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>Tokens: {result.totals.input} in, {result.totals.output} out</span>
-              {showSaveButton && (
-                <button
-                  onClick={handleSaveArtifact}
-                  style={{
-                    padding: "0.5rem 1rem",
-                    background: "#238636",
-                    border: "none",
-                    borderRadius: "6px",
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontSize: "0.85rem",
-                  }}
-                >
-                  Save to Catalog
-                </button>
+            <div style={{ marginTop: "1rem", color: "#8b949e", fontSize: "0.8rem" }}>
+              Tokens: {result.totals.input} in, {result.totals.output} out
+              {result.artifacts && result.artifacts.length > 0 && (
+                <span style={{ marginLeft: "1rem", color: "#58a6ff" }}>
+                  💡 To save artifacts, ask the orchestrator: "save [chart] to catalog [category]/[subject]"
+                </span>
               )}
             </div>
           </div>
