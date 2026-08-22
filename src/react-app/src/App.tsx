@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { ThinkingPanel } from "./components/ThinkingPanel";
+import { ConversationPanel } from "./components/ConversationPanel";
 import "./App.css";
 
 interface Artifact {
@@ -18,6 +20,24 @@ interface OrchestratorResult {
   totals: { input: number; output: number };
 }
 
+interface ThinkingEntry {
+  id: string;
+  timestamp: string;
+  kind: "assistant_text" | "reasoning" | "tool_call" | "tool_result" | "status" | "agent_start" | "agent_end" | "turn_start" | "turn_end";
+  label: string;
+  body?: string;
+  isError?: boolean;
+  streaming?: boolean;
+}
+
+interface ConversationMessage {
+  id: string;
+  timestamp: string;
+  kind: "prompt" | "response" | "question";
+  role: "user" | "assistant" | "agent";
+  text: string;
+}
+
 export function App() {
   return <FoundryApp />;
 }
@@ -29,11 +49,44 @@ function FoundryApp() {
   const [result, setResult] = useState<OrchestratorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Thinking + conversation state (mirrors http_proxy panels)
+  const [thinkingEntries, setThinkingEntries] = useState<ThinkingEntry[]>([]);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [thinkingUnread, setThinkingUnread] = useState(0);
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
+  const [conversationOpen, setConversationOpen] = useState(false);
+  const [conversationUnread, setConversationUnread] = useState(0);
+
   useEffect(() => {
     if (!conversationId) {
       setConversationId(`conv-${Date.now()}`);
     }
   }, [conversationId]);
+
+  const addThinking = (kind: ThinkingEntry["kind"], label: string, body?: string, isError = false) => {
+    const entry: ThinkingEntry = {
+      id: `${Date.now()}-${Math.random()}`,
+      timestamp: new Date().toISOString(),
+      kind,
+      label,
+      body,
+      isError,
+    };
+    setThinkingEntries((prev) => [...prev, entry]);
+    if (!thinkingOpen) setThinkingUnread((n) => n + 1);
+  };
+
+  const addConversation = (role: "user" | "assistant", text: string) => {
+    const msg: ConversationMessage = {
+      id: `${Date.now()}-${Math.random()}`,
+      timestamp: new Date().toISOString(),
+      kind: role === "user" ? "prompt" : "response",
+      role,
+      text,
+    };
+    setConversationMessages((prev) => [...prev, msg]);
+    if (!conversationOpen) setConversationUnread((n) => n + 1);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,6 +95,9 @@ function FoundryApp() {
     setLoading(true);
     setError(null);
     setResult(null);
+
+    addConversation("user", prompt);
+    addThinking("agent_start", `Invoking orchestrator (conversation: ${conversationId})…`);
 
     try {
       const res = await fetch("/api/invoke", {
@@ -54,10 +110,33 @@ function FoundryApp() {
         throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       }
 
-      const data = await res.json();
+      const data = (await res.json()) as OrchestratorResult;
       setResult(data);
+
+      // Populate thinking panel from the orchestrator's steps
+      if (data.plan) {
+        addThinking("reasoning", "Plan", data.plan.rationale);
+        data.plan.steps.forEach((s, i) => {
+          addThinking("reasoning", `Step ${i + 1}`, `${s.role} on ${s.deployment} — ${s.task}`);
+        });
+      }
+      if (data.steps) {
+        data.steps.forEach((s) => {
+          addThinking("tool_call", `${s.role} [${s.deployment}]`, undefined, false);
+          addThinking("tool_result", "Result", s.output.slice(0, 300) + (s.output.length > 300 ? "…" : ""));
+        });
+      }
+      if (data.artifacts && data.artifacts.length > 0) {
+        addThinking("status", "Artifacts", data.artifacts.map((a) => a.path).join(", "));
+      }
+      addThinking("agent_end", `Done. Tokens: ${data.totals.input} in, ${data.totals.output} out`);
+
+      addConversation("assistant", data.response);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      addThinking("agent_end", `Error: ${msg}`, undefined, true);
+      addConversation("assistant", `Error: ${msg}`);
     } finally {
       setLoading(false);
     }
@@ -68,6 +147,10 @@ function FoundryApp() {
     setResult(null);
     setError(null);
     setPrompt("");
+    setThinkingEntries([]);
+    setThinkingUnread(0);
+    setConversationMessages([]);
+    setConversationUnread(0);
   };
 
   return (
@@ -99,6 +182,27 @@ function FoundryApp() {
         >
           New
         </button>
+        <ConversationPanel
+          messages={conversationMessages}
+          open={conversationOpen}
+          unread={conversationUnread}
+          working={loading}
+          onClose={() => {
+            setConversationOpen(!conversationOpen);
+            setConversationUnread(0);
+          }}
+        />
+        <ThinkingPanel
+          entries={thinkingEntries}
+          open={thinkingOpen}
+          unread={thinkingUnread}
+          working={loading}
+          onToggle={() => {
+            setThinkingOpen(!thinkingOpen);
+            setThinkingUnread(0);
+          }}
+          onClose={() => setThinkingOpen(false)}
+        />
       </nav>
 
       <main className="viewer">
@@ -194,6 +298,9 @@ function FoundryApp() {
           <div className="empty-state">
             <h2>Foundry Hosted Agent</h2>
             <p>Submit a prompt to invoke the orchestrator. It will plan, execute steps, and return artifacts.</p>
+            <p style={{ marginTop: "1rem", color: "#8b949e", fontSize: "0.85rem" }}>
+              Click the chat icon to see the conversation, or the activity icon to see the orchestrator's thinking.
+            </p>
           </div>
         )}
       </main>
