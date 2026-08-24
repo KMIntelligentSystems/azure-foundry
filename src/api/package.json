@@ -9,11 +9,11 @@
   },
   "dependencies": {
     "@azure/functions": "^4.6.0",
-    "@azure/identity": "^4.13.1",
-    "azure-functions-core-tools": "^4.13.0"
+    "@azure/identity": "^4.13.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "azure-functions-core-tools": "4.13.0"
   }
 }
