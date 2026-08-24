@@ -1,9 +1,11 @@
 /**
  * Azure Function: POST /api/invoke
  *
- * Thin proxy from React → Foundry hosted agent. Gets an Entra token via
- * DefaultAzureCredential (managed identity in Azure, az login locally),
- * calls the orchestrator's /invocations endpoint, returns the JSON.
+ * Thin proxy from React → Foundry hosted agent. Auth order:
+ *   1. AZURE_AI_PROJECT_API_KEY (api-key header) — required on Free-SKU SWA,
+ *      which cannot have a managed identity.
+ *   2. DefaultAzureCredential (managed identity / az login locally).
+ * Calls the orchestrator's /invocations endpoint, returns the JSON.
  */
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { DefaultAzureCredential } from "@azure/identity";
@@ -14,6 +16,7 @@ const PROJECT_ENDPOINT =
 const AGENT_NAME = process.env["AGENT_NAME"] ?? "orchestrator";
 const SCOPE = "https://ai.azure.com/.default";
 const API_VERSION = "v1";
+const API_KEY = process.env["AZURE_AI_PROJECT_API_KEY"];
 
 const credential = new DefaultAzureCredential();
 let cachedToken: { token: string; expiresAt: number } | null = null;
@@ -27,12 +30,19 @@ async function getToken(): Promise<string> {
   return t.token;
 }
 
+async function authHeaders(): Promise<Record<string, string>> {
+  if (API_KEY) {
+    return { "api-key": API_KEY };
+  }
+  return { Authorization: `Bearer ${await getToken()}` };
+}
+
 // Resolve the highest published version of the agent. The "latest" alias is
 // rejected by the service while a version is still provisioning
 // (agent_version_not_ready), so pin to a concrete version number.
-async function resolveLatestVersion(token: string): Promise<string> {
+async function resolveLatestVersion(headers: Record<string, string>): Promise<string> {
   const res = await fetch(`${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/versions?api-version=${API_VERSION}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers,
   });
   if (!res.ok) {
     throw new Error(`Failed to list agent versions: HTTP ${res.status}`);
@@ -57,15 +67,12 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
     }
 
     // Create a session (endpoint-scoped path; /agents/{name}/sessions 404s)
-    const token = await getToken();
-    const agentVersion = await resolveLatestVersion(token);
+    const headers = await authHeaders();
+    const agentVersion = await resolveLatestVersion(headers);
     const sessionUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/sessions?api-version=${API_VERSION}`;
     const sessionRes = await fetch(sessionUrl, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ version_indicator: { type: "version_ref", agent_version: agentVersion } }),
     });
 
@@ -81,10 +88,7 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
       const invokeUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/protocols/invocations?api-version=${API_VERSION}`;
       const invokeRes = await fetch(invokeUrl, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           agent_session_id: sessionId,
           conversation_id: body.conversation_id,
@@ -103,7 +107,7 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
       // Clean up the session
       await fetch(`${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/sessions/${sessionId}?api-version=${API_VERSION}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       }).catch(() => {
         /* best effort */
       });
