@@ -2,14 +2,15 @@
   "name": "azure-foundry-api",
   "version": "0.1.0",
   "type": "module",
-  "main": "invoke/index.js",
+  "main": "dist/index.js",
   "scripts": {
     "start": "func start",
     "build": "tsc"
   },
   "dependencies": {
     "@azure/functions": "^4.6.0",
-    "@azure/identity": "^4.13.1"
+    "@azure/identity": "^4.13.1",
+    "azure-functions-core-tools": "^4.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

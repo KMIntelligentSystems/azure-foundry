@@ -76,9 +76,11 @@ function resolveInWorkspace(ws: string, rel: string): string | null {
 // broker reads the workspace file, uploads it to the artifact service
 // (which stores it and returns a URL), then saves the metadata.
 
-const ARTIFACT_SERVICE_URL =
-  process.env["ARTIFACT_SERVICE_URL"] ??
-  "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
+// Read lazily: tests and embedders set the env before dispatch, not import.
+function artifactServiceUrl(): string {
+  return process.env["ARTIFACT_SERVICE_URL"] ??
+    "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
+}
 
 async function saveArtifactToCatalog(
   args: Record<string, unknown>,
@@ -103,8 +105,13 @@ async function saveArtifactToCatalog(
   const mimeType = path.endsWith(".html") ? "text/html" : path.endsWith(".json") ? "application/json" : path.endsWith(".md") ? "text/markdown" : "application/octet-stream";
 
   // Upload file content to artifact service (which stores it + returns URL)
+  /*
+- Upload shape: POST {artifactServiceUrl}/artifacts/upload (broker wraps it as save_artifact)
+ - Sync: POST {artifactServiceUrl}/refresh-sync — a privileged system verb, ~HTTP 4xx surfaces as sync_failed
+
+  */
   try {
-    const uploadRes = await fetch(`${ARTIFACT_SERVICE_URL}/artifacts/upload`, {
+    const uploadRes = await fetch(`${artifactServiceUrl()}/artifacts/upload`, {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
@@ -120,7 +127,7 @@ async function saveArtifactToCatalog(
     const { url } = (await uploadRes.json()) as { url: string };
 
     // Save metadata to catalog
-    const saveRes = await fetch(`${ARTIFACT_SERVICE_URL}/artifacts`, {
+    const saveRes = await fetch(`${artifactServiceUrl()}/artifacts`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -134,6 +141,96 @@ async function saveArtifactToCatalog(
     }
     const saved = (await saveRes.json()) as { id: string };
     return ok({ artifactId: saved.id, url, title, category, subject });
+  } catch (e) {
+    return err("network_error", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ── Catalog read tools (artifact service) ────────────────────────────────
+//
+// The user's saved artifacts live in the artifact service (SQLite
+// artifacts.db behind /artifacts), NOT in the workspace. These two tools
+// are the read side of that catalog; save_artifact above is the write side.
+
+interface CatalogEntry {
+  id: string;
+  user_id: string;
+  category: string;
+  subject: string;
+  title: string;
+  mime_type: string;
+  url: string;
+  created_at: string;
+  tags: string | null;
+}
+
+function resolveContentUrl(url: string): string {
+  return url.startsWith("http") ? url : `${artifactServiceUrl()}${url}`;
+}
+
+async function listArtifactsFromCatalog(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+  try {
+    const res = await fetch(`${artifactServiceUrl()}/artifacts`, {
+      headers: { "X-User-Id": userId },
+    });
+    if (!res.ok) {
+      return err("list_failed", `artifact service list: HTTP ${res.status}`);
+    }
+    let entries = ((await res.json()) as { artifacts: CatalogEntry[] }).artifacts ?? [];
+    const category = args["category"] ? String(args["category"]).toLowerCase() : undefined;
+    const subject = args["subject"] ? String(args["subject"]).toLowerCase() : undefined;
+    const tags = args["tags"] ? String(args["tags"]).toLowerCase() : undefined;
+    const mimeType = args["mime_type"] ? String(args["mime_type"]).toLowerCase() : undefined;
+    if (category) entries = entries.filter((e) => e.category.toLowerCase().includes(category));
+    if (subject) entries = entries.filter((e) => e.subject.toLowerCase().includes(subject));
+    if (tags) entries = entries.filter((e) => (e.tags ?? "").toLowerCase().includes(tags));
+    if (mimeType) entries = entries.filter((e) => e.mime_type.toLowerCase().startsWith(mimeType));
+    const total = entries.length;
+    entries = entries.slice(0, 50);
+    return ok({
+      total,
+      shown: entries.length,
+      artifacts: entries.map((e) => ({
+        id: e.id,
+        title: e.title,
+        category: e.category,
+        subject: e.subject,
+        mimeType: e.mime_type,
+        url: resolveContentUrl(e.url),
+        createdAt: e.created_at,
+        tags: e.tags,
+      })),
+    });
+  } catch (e) {
+    return err("network_error", e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function readArtifactContent(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+  const id = String(args["artifact_id"] ?? "");
+  if (!id) return err("invalid_args", "artifact_id is required");
+  try {
+    const metaRes = await fetch(`${artifactServiceUrl()}/artifacts/${encodeURIComponent(id)}`, {
+      headers: { "X-User-Id": userId },
+    });
+    if (!metaRes.ok) {
+      return err("not_found", `artifact service get: HTTP ${metaRes.status}`);
+    }
+    const meta = (await metaRes.json()) as CatalogEntry;
+    const contentUrl = resolveContentUrl(meta.url);
+    const contentRes = await fetch(contentUrl, { headers: { "X-User-Id": userId } });
+    if (!contentRes.ok) {
+      return err("fetch_failed", `artifact content fetch: HTTP ${contentRes.status}`);
+    }
+    const text = await contentRes.text();
+    return ok({
+      id: meta.id,
+      title: meta.title,
+      mimeType: meta.mime_type,
+      url: contentUrl,
+      content: text.slice(0, 50_000),
+      truncated: text.length > 50_000,
+    });
   } catch (e) {
     return err("network_error", e instanceof Error ? e.message : String(e));
   }
@@ -302,6 +399,46 @@ const CATALOG: Record<string, ToolDef> = {
     },
     run: (a, ws) => runPython(String(a["code"] ?? ""), ws),
   },
+  list_artifacts: {
+    spec: {
+      type: "function",
+      name: "list_artifacts",
+      description:
+        "List entries in the user's saved artifact catalog (the SQLite artifacts.db behind the artifact service — " +
+        "NOT workspace files). Returns id, title, category, subject, mimeType, content url, createdAt. " +
+        "Use first whenever the user asks about their catalog, saved charts, or artifacts.db.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          category: { type: ["string", "null"], description: "Filter: category substring (optional)" },
+          subject: { type: ["string", "null"], description: "Filter: subject substring (optional)" },
+          tags: { type: ["string", "null"], description: "Filter: tag substring (optional)" },
+          mime_type: { type: ["string", "null"], description: "Filter: mime prefix, e.g. text/html for charts (optional)" },
+        },
+        required: ["category", "subject", "tags", "mime_type"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, _ws, ctx) => listArtifactsFromCatalog(a, ctx?.userId ?? "unknown"),
+  },
+  read_artifact: {
+    spec: {
+      type: "function",
+      name: "read_artifact",
+      description:
+        "Read one entry from the user's artifact catalog by id (from list_artifacts). Returns metadata plus " +
+        "the artifact content (truncated at 50k chars). Use after list_artifacts to inspect a chart's HTML or text.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: { artifact_id: { type: "string", description: "Catalog entry id" } },
+        required: ["artifact_id"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, _ws, ctx) => readArtifactContent(a, ctx?.userId ?? "unknown"),
+  },
   save_artifact: {
     spec: {
       type: "function",
@@ -324,6 +461,45 @@ const CATALOG: Record<string, ToolDef> = {
       },
     },
     run: async (a, ws, ctx) => saveArtifactToCatalog(a, ws, ctx?.userId ?? "unknown"),
+  },
+  sync_indicator_history: {
+    spec: {
+      type: "function",
+      name: "sync_indicator_history",
+      description:
+        "Push the catalog's tagged backbone CSVs (text/csv artifacts) to the refresh-daemon's " +
+        "indicator_history (HMAC-authed /refresh/bootstrap, idempotent upsert on series+month). " +
+        "Server-side deterministic bridge — the agent sees only the SyncReport, never CSV bytes. " +
+        "dryRun previews without posting.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          dryRun: { type: ["boolean", "null"], description: "Build and report the payload without posting (optional)." },
+        },
+        required: ["dryRun"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, _ws, ctx) => {
+      const res = await fetch(`${artifactServiceUrl()}/refresh-sync`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": ctx?.userId ?? "unknown",
+          // refresh-sync is a privileged system verb — the artifact-service
+          // route accepts admin role only for this one path.
+          "X-User-Role": "admin",
+        },
+        body: JSON.stringify({ dryRun: a["dryRun"] === true }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        return err("sync_failed", `artifact-service refresh-sync: HTTP ${res.status} ${detail.slice(0, 200)}`);
+      }
+      const report = (await res.json()) as unknown;
+      return ok(report);
+    },
   },
   render_validate: {
     spec: {

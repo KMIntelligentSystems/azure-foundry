@@ -13,6 +13,7 @@ const PROJECT_ENDPOINT =
   "https://forecastingmodule.services.ai.azure.com/api/projects/proj-default";
 const AGENT_NAME = process.env["AGENT_NAME"] ?? "orchestrator";
 const SCOPE = "https://ai.azure.com/.default";
+const API_VERSION = "v1";
 
 const credential = new DefaultAzureCredential();
 let cachedToken: { token: string; expiresAt: number } | null = null;
@@ -26,6 +27,24 @@ async function getToken(): Promise<string> {
   return t.token;
 }
 
+// Resolve the highest published version of the agent. The "latest" alias is
+// rejected by the service while a version is still provisioning
+// (agent_version_not_ready), so pin to a concrete version number.
+async function resolveLatestVersion(token: string): Promise<string> {
+  const res = await fetch(`${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/versions?api-version=${API_VERSION}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to list agent versions: HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as { data?: Array<{ version?: string }> };
+  const versions = (data.data ?? []).map((v) => Number(v.version)).filter((n) => Number.isFinite(n));
+  if (versions.length === 0) {
+    throw new Error(`No published versions of agent "${AGENT_NAME}"`);
+  }
+  return String(Math.max(...versions));
+}
+
 export async function invoke(req: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
     const body = (await req.json()) as { conversation_id?: string; promptText?: string; user_id?: string };
@@ -37,16 +56,17 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
       };
     }
 
-    // Create a session
+    // Create a session (endpoint-scoped path; /agents/{name}/sessions 404s)
     const token = await getToken();
-    const sessionUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/sessions?api-version=2025-11-15-preview`;
+    const agentVersion = await resolveLatestVersion(token);
+    const sessionUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/sessions?api-version=${API_VERSION}`;
     const sessionRes = await fetch(sessionUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ type: "version_ref", agent_version: "latest" }),
+      body: JSON.stringify({ version_indicator: { type: "version_ref", agent_version: agentVersion } }),
     });
 
     if (!sessionRes.ok) {
@@ -58,7 +78,7 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
 
     try {
       // Invoke the agent
-      const invokeUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/protocols/invocations?api-version=2025-11-15-preview`;
+      const invokeUrl = `${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/protocols/invocations?api-version=${API_VERSION}`;
       const invokeRes = await fetch(invokeUrl, {
         method: "POST",
         headers: {
@@ -81,7 +101,7 @@ export async function invoke(req: HttpRequest, context: InvocationContext): Prom
       return { status: 200, jsonBody: result };
     } finally {
       // Clean up the session
-      await fetch(`${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/sessions/${sessionId}?api-version=2025-11-15-preview`, {
+      await fetch(`${PROJECT_ENDPOINT}/agents/${AGENT_NAME}/endpoint/sessions/${sessionId}?api-version=${API_VERSION}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       }).catch(() => {

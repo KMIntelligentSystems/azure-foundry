@@ -120,6 +120,29 @@ all 3 artifacts. Planner/executor split end-to-end.
 (deployment → InsufficientQuota, 2026-08-19); planner is **gpt-4.1** until a quota
 request lands. Deployed: gpt-4.1 (planner) + gpt-4.1-mini (worker).
 
+## Chunk 8 — backbone sync → azure refresh.db (2026-08-24, WORKS)
+
+Closes the two-item gap between http_proxy and azure-foundry:
+(1) get the catalog's backbone CSVs into the azure refresh daemon's
+indicator_history; (2) let the orchestrator invoke the same
+`sync_indicator_history` tool http_proxy has.
+
+| Module | Role |
+|---|---|
+| artifact-service `POST /refresh-sync` (daemon repo) | server-side bridge: tagged text/csv catalog rows → baked-in `data/series-map.json` allowlist → YYYY-MM normalization → HMAC-signed POST to `$REFRESH_DAEMON_URL/refresh/bootstrap`. Admin-role gated. |
+| broker `sync_indicator_history` | thin wrapper in the broker's CATALOG; only ever sees the SyncReport — the LLM cannot author bytes for the refresh target. Same trust shape as http_proxy's orchestrator tool. |
+| `roles/operator.md` | system-operator role with catalog limited to `sync_indicator_history`; routes "sync the backbone" prompts. |
+| `scripts/smoke-refresh-sync.ts` | stub artifact-service gate test: dispatch passes dryRun + admin header, non-listed roles rejected, non-OK → sync_failed. |
+
+Deployment wiring: the artifact-service ACA app needs `REFRESH_DAEMON_URL`
+(+ `DAEMON_HMAC_KEY` from secrets). The baked series-map.json is a checked-in
+copy of http_proxy's `data/series-map.json`; when hub series are added, sync
+both.
+
+**Proven:** daemon repo `artifact-service npm test` (12/12 — stub refresh-daemon
+verifies HMAC + YYYY-MM normalization); azure repo `npx tsx scripts/smoke-refresh-sync.ts`
+(6/6 — dispatch gates + role registration).
+
 ## State of play
 
 Versions 1–3 registered; provisioning reached `ImageError` (registry auth);

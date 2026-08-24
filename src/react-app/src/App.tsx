@@ -4,6 +4,64 @@ import { ConversationPanel } from "./components/ConversationPanel";
 import { SimpleCatalogTree } from "./components/SimpleCatalogTree";
 import "./App.css";
 
+const ARTIFACT_SERVICE = "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
+
+/**
+ * Fetches artifact content WITH the X-User-Id header (iframes can't send
+ * headers, and the service 401s without it), then displays it: HTML via a
+ * blob: URL iframe, everything else as text.
+ */
+function ArtifactViewer({ artifact, userId }: { artifact: CatalogArtifact; userId: string }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [text, setText] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoked: string | null = null;
+    let cancelled = false;
+    setBlobUrl(null);
+    setText(null);
+    setErr(null);
+    const src = artifact.url.startsWith("http") ? artifact.url : `${ARTIFACT_SERVICE}${artifact.url}`;
+    fetch(src, { headers: { "X-User-Id": userId } })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.text();
+        if (cancelled) return;
+        if (artifact.mime_type === "text/html") {
+          revoked = URL.createObjectURL(new Blob([body], { type: "text/html" }));
+          setBlobUrl(revoked);
+        } else {
+          setText(body);
+        }
+      })
+      .catch((e) => !cancelled && setErr(e instanceof Error ? e.message : String(e)));
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [artifact.id, artifact.url, artifact.mime_type, userId]);
+
+  if (err) return <p style={{ color: "#f78166" }}>Failed to load artifact: {err}</p>;
+  if (blobUrl) {
+    return (
+      <iframe
+        src={blobUrl}
+        style={{ width: "100%", height: "70vh", border: "1px solid #30363d", borderRadius: "6px", background: "#fff" }}
+        sandbox="allow-scripts"
+      />
+    );
+  }
+  if (text !== null) {
+    return (
+      <pre style={{ padding: "1rem", background: "#0d1117", borderRadius: "6px", overflow: "auto", color: "#c9d1d9" }}>
+        {text}
+      </pre>
+    );
+  }
+  return <p style={{ color: "#8b949e" }}>Loading artifact…</p>;
+}
+
 interface Artifact {
   path: string;
   kind: string;
@@ -62,10 +120,21 @@ function FoundryApp() {
   const [result, setResult] = useState<OrchestratorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  // Auth state
-  const [userId, setUserId] = useState(sessionStorage.getItem("foundry_user") ?? "");
+  // Auth state. `userId` is the CONFIRMED identity (set only on login);
+  // the login form edits drafts so typing the first character doesn't flip
+  // the `if (!userId)` gate and unmount the form mid-entry.
+  // User IDs are compared case-sensitively by the artifact service
+  // (`Admin` ≠ `admin` → empty catalog), so normalize to lowercase at the
+  // identity boundary — both the sessionStorage restore and login.
+  const [userId, setUserId] = useState((sessionStorage.getItem("foundry_user") ?? "").trim().toLowerCase());
   const [userRole, setUserRole] = useState<"admin" | "user">((sessionStorage.getItem("foundry_role") as "admin" | "user") ?? "user");
+  const [loginId, setLoginId] = useState("");
+  const [loginRole, setLoginRole] = useState<"admin" | "user">("user");
   const [selectedArtifact, setSelectedArtifact] = useState<CatalogArtifact | null>(null);
+  // Bumped after every completed orchestrator turn so the catalog tree
+  // re-fetches — a prompt like "fetch the artifacts" then visibly updates
+  // the Documents panel instead of only answering in the conversation.
+  const [catalogRefreshKey, setCatalogRefreshKey] = useState(0);
 
   // Thinking + conversation state (mirrors http_proxy panels)
   const [thinkingEntries, setThinkingEntries] = useState<ThinkingEntry[]>([]);
@@ -130,6 +199,7 @@ function FoundryApp() {
 
       const data = (await res.json()) as OrchestratorResult;
       setResult(data);
+      setCatalogRefreshKey((k) => k + 1);
 
       // Populate thinking panel from the orchestrator's steps
       if (data.plan) {
@@ -173,9 +243,12 @@ function FoundryApp() {
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userId.trim()) return;
-    sessionStorage.setItem("foundry_user", userId);
-    sessionStorage.setItem("foundry_role", userRole);
+    if (!loginId.trim()) return;
+    const normalizedId = loginId.trim().toLowerCase();
+    sessionStorage.setItem("foundry_user", normalizedId);
+    sessionStorage.setItem("foundry_role", loginRole);
+    setUserId(normalizedId);
+    setUserRole(loginRole);
   };
 
   const handleLogout = () => {
@@ -200,8 +273,8 @@ function FoundryApp() {
               <label style={{ display: "block", marginBottom: "0.5rem", color: "#8b949e" }}>User ID</label>
               <input
                 type="text"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
                 placeholder="kim"
                 style={{
                   width: "100%",
@@ -216,8 +289,8 @@ function FoundryApp() {
             <div style={{ marginBottom: "1rem" }}>
               <label style={{ display: "block", marginBottom: "0.5rem", color: "#8b949e" }}>Role</label>
               <select
-                value={userRole}
-                onChange={(e) => setUserRole(e.target.value as "admin" | "user")}
+                value={loginRole}
+                onChange={(e) => setLoginRole(e.target.value as "admin" | "user")}
                 style={{
                   width: "100%",
                   padding: "0.5rem",
@@ -233,7 +306,7 @@ function FoundryApp() {
             </div>
             <button
               type="submit"
-              disabled={!userId.trim()}
+              disabled={!loginId.trim()}
               style={{
                 width: "100%",
                 padding: "0.75rem",
@@ -323,6 +396,7 @@ function FoundryApp() {
           userId={userId}
           isAdmin={userRole === "admin"}
           onSelect={handleSelectArtifact}
+          refreshKey={catalogRefreshKey}
         />
       </aside>
 
@@ -426,17 +500,7 @@ function FoundryApp() {
             <p style={{ color: "#8b949e", marginBottom: "1rem" }}>
               {selectedArtifact.category} / {selectedArtifact.subject} • {selectedArtifact.mime_type}
             </p>
-            {selectedArtifact.mime_type === "text/html" ? (
-              <iframe
-                src={selectedArtifact.url}
-                style={{ width: "100%", height: "70vh", border: "1px solid #30363d", borderRadius: "6px" }}
-                sandbox="allow-scripts"
-              />
-            ) : (
-              <pre style={{ padding: "1rem", background: "#0d1117", borderRadius: "6px", overflow: "auto" }}>
-                {selectedArtifact.url}
-              </pre>
-            )}
+            <ArtifactViewer artifact={selectedArtifact} userId={userId} />
           </div>
         )}
 

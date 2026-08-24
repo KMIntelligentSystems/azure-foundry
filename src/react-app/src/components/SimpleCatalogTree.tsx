@@ -17,11 +17,13 @@ interface CatalogTreeProps {
   isAdmin: boolean;
   onSelect: (artifact: Artifact) => void;
   onDelete?: (id: string) => void;
+  /** Bump to force a re-fetch (e.g. after an orchestrator turn). */
+  refreshKey?: number;
 }
 
 const API_BASE = "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
 
-export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete }: CatalogTreeProps) {
+export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete, refreshKey }: CatalogTreeProps) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +50,7 @@ export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete }: Catal
 
   useEffect(() => {
     if (userId) fetchArtifacts();
-  }, [userId, isAdmin]);
+  }, [userId, isAdmin, refreshKey]);
 
   // Group by category → subject
   const tree = artifacts.reduce<Record<string, Record<string, Artifact[]>>>((acc, a) => {
