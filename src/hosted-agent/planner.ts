@@ -60,7 +60,14 @@ RULES:
 - 1-5 steps. Each step: role (from the list), task (self-contained instruction),
   deployment (a WORKER deployment; never a planner one).
 - Do not invent roles. If the prompt needs no roles, emit a plan with a single
-  step whose role best answers directly.`;
+  step whose role best answers directly.
+
+PROMPT FILES: reusable prompt documents live in the artifact catalog as
+text/markdown artifacts tagged "prompt" (category "Prompts"). When the user
+references a prompt file by name (e.g. "run the aug-2026-ADL prompt" or
+"/prompts/aug-2026-ADL.md"), make the FIRST step a reader step that lists
+artifacts tagged "prompt" and reads the matching one; the following step(s)
+then execute the instructions it contains.`;
 }
 
 const EMIT_PLAN_TOOL = {
