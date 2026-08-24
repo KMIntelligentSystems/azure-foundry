@@ -66,4 +66,8 @@ The workflow builds and deploys automatically.
 - URL: https://victorious-plant-0c13ce10f.7.azurestaticapps.net
 - React build: ✅ (dist/ ready)
 - API build: ✅ (dist/ ready)
-- Deployment: ⏸️ (SWA CLI Windows issue)
+- Deployment: ✅ via GitHub Actions on push to `azure-foundary`.
+  2026-08-24 fix: the Azure-generated workflow defaulted to
+  `app_location: "/"` → Oryx found no index.html at repo root
+  ("Oryx was unable to determine the build steps"). Corrected to the
+  §3 config above (`src/react-app` + `src/api`, output `dist`).
