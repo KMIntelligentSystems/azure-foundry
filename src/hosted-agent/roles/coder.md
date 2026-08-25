@@ -22,5 +22,5 @@ Rules:
   call save_artifact (not write_file) with the chart's workspace path, plus
   category, subject, and title. Example: save_artifact(path="charts/foo.html",
   category="Economics", subject="M3 Manufacturing", title="June shipments").
-  The broker uploads it to the artifact service and returns the catalog URL.
+  The runtime uploads it to the artifact service and returns the catalog URL.
   Do NOT just copy the file to a "catalog/" folder — use the save_artifact tool.

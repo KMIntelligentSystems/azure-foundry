@@ -1,13 +1,27 @@
 /**
- * broker.ts — the airlock, in-process. Roles never touch the filesystem,
- * network, or processes except through dispatch(). A role's tool catalog is
- * closed: anything not listed returns unknown_tool. Budgets are enforced here,
- * per step — iteration count, wall clock, and a cost ceiling fed from the
- * caller's token usage.
+ * toolbox.ts — the flow-1 interactive orchestrator's tool runtime.
  *
- * Chunk-3 scope: read_file / write_file / list_files inside a per-conversation
- * workspace (path-escape proof). execute_python lands in chunk 4;
- * playwright in chunk 5.
+ * ARCHITECTURE NOTE (2026-08-26 correction — this module was broker.ts):
+ * This is NOT the airlock, and the SWA does not depend on one. In the source
+ * app (http_proxy) the trust split is:
+ *
+ *   flow 1 (interactive, human-in-the-loop): React app → host → orchestrator
+ *     agent with an OPEN tool set (fetch_page, web_search, query_artifacts,
+ *     execute_python, playwright...). No broker in this path.
+ *   flow 2 (unattended refresh): the oracle + 4-verb airlock — source oracle
+ *     is the Rust daemon (c:/repos/daemon, ACA app `daemon-airlock`); the
+ *     target oracle is http_proxy's src/refresh. THAT is where the closed
+ *     catalog belongs, because no human watches those runs.
+ *
+ * The N2 design doc mistakenly copied flow-2's airlock property ("roles never
+ * touch FS/network except through the broker") into this flow-1 container.
+ * The correction: per-role tool lists and budgets remain — as least-privilege
+ * scoping and cost discipline (LLM proposes, runtime disposes) — but this
+ * catalog is the orchestrator's TOOLBOX: it grows with ordinary capabilities
+ * (fetch_url, workspace files, catalog read/save, python, render_validate)
+ * without airlock justification, and it holds no signing keys or secrets.
+ * The one refresh-adjacent verb (sync_indicator_history) is gated server-side
+ * at the artifact-service (admin role + HMAC) — not by anything in this file.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -73,7 +87,7 @@ function resolveInWorkspace(ws: string, rel: string): string | null {
 // ── save_artifact: upload workspace file to artifact service (chunk 7) ────
 //
 // The user's "save this to catalog X" prompt becomes a tool call here. The
-// broker reads the workspace file, uploads it to the artifact service
+// toolbox reads the workspace file, uploads it to the artifact service
 // (which stores it and returns a URL), then saves the metadata.
 
 // Read lazily: tests and embedders set the env before dispatch, not import.
@@ -106,7 +120,7 @@ async function saveArtifactToCatalog(
 
   // Upload file content to artifact service (which stores it + returns URL)
   /*
-- Upload shape: POST {artifactServiceUrl}/artifacts/upload (broker wraps it as save_artifact)
+- Upload shape: POST {artifactServiceUrl}/artifacts/upload (toolbox wraps it as save_artifact)
  - Sync: POST {artifactServiceUrl}/refresh-sync — a privileged system verb, ~HTTP 4xx surfaces as sync_failed
 
   */
@@ -236,7 +250,7 @@ async function readArtifactContent(args: Record<string, unknown>, userId: string
   }
 }
 
-// ── execute_python: the one spawn the broker permits ──────────────────────
+// ── execute_python: the one spawn the runtime permits ──────────────────────
 //
 // Runs model-authored Python in a locked-down child (mirrors lockdown.rs):
 // scrubbed env, cwd = workspace, CPU/memory rlimits on Linux, 60s kill.
@@ -277,6 +291,77 @@ function runPython(code: string, ws: string): ToolResult {
     return err("python_error", `${e?.message ?? "python failed"}\n${stderr}${stdout ? `\nstdout before error: ${stdout}` : ""}`);
   } finally {
     try { fs.unlinkSync(scriptPath); } catch { /* best-effort */ }
+  }
+}
+
+// ── fetch_url: read one external URL into the conversation ───────────────
+//
+// An ordinary flow-1 capability (mirrors http_proxy's fetch_page). Roles
+// otherwise cannot touch the network except the hardcoded artifact-service
+// URLs, so this is deliberately guarded: http(s)
+// only, loopback/private hosts refused (SSRF), streamed body capped, 30s
+// timeout. Optional env FETCH_URL_ALLOWLIST (comma-separated host suffixes)
+// tightens it further when set — e.g. "blob.core.windows.net".
+
+const FETCH_MAX_BYTES = 256 * 1024;
+const FETCH_TIMEOUT_MS = 30_000;
+
+function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (h === "169.254.169.254") return true; // Azure IMDS
+  if (h === "[::1]" || h.startsWith("fe80") || h.startsWith("fc") || h.startsWith("fd")) return true;
+  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) return true;
+  }
+  return false;
+}
+
+async function fetchUrl(args: Record<string, unknown>): Promise<ToolResult> {
+  const raw = String(args["url"] ?? "");
+  let u: URL;
+  try { u = new URL(raw); } catch { return err("invalid_args", "malformed URL"); }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return err("invalid_args", "only http(s) URLs");
+  if (isPrivateHost(u.hostname)) return err("refused", "loopback/private hosts are not fetchable");
+  const allow = (process.env["FETCH_URL_ALLOWLIST"] ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (allow.length && !allow.some((sfx) => u.hostname.toLowerCase().endsWith(sfx))) {
+    return err("refused", `host not in FETCH_URL_ALLOWLIST: ${u.hostname}`);
+  }
+  try {
+    const res = await fetch(u, { redirect: "follow", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) return err("fetch_failed", `HTTP ${res.status}`);
+    const contentType = res.headers.get("content-type") ?? "";
+    // Stream with a byte cap instead of buffering the whole body.
+    const chunks: Buffer[] = [];
+    let bytes = 0, truncated = false;
+    if (res.body) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (bytes + value.byteLength > FETCH_MAX_BYTES) {
+          truncated = true;
+          chunks.push(Buffer.from(value.subarray(0, FETCH_MAX_BYTES - bytes)));
+          bytes = FETCH_MAX_BYTES;
+          reader.cancel().catch(() => { /* best-effort */ });
+          break;
+        }
+        chunks.push(Buffer.from(value));
+        bytes += value.byteLength;
+      }
+    }
+    const text = Buffer.concat(chunks).toString("utf8");
+    return ok({
+      url: u.toString(),
+      contentType,
+      bytes,
+      content: text.slice(0, 100_000),
+      truncated: truncated || text.length > 100_000,
+    });
+  } catch (e) {
+    return err("network_error", e instanceof Error ? e.message.slice(0, 300) : String(e));
   }
 }
 
@@ -522,6 +607,24 @@ const CATALOG: Record<string, ToolDef> = {
       return renderValidate(p);
     },
   },
+  fetch_url: {
+    spec: {
+      type: "function",
+      name: "fetch_url",
+      description:
+        "Fetch one external URL (http/https) and return its text content (capped at 100k chars). " +
+        "Use for SAS-signed Azure blob links, raw data files, and web pages the user names. " +
+        "GET only; loopback/private hosts refused.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string", description: "Full URL including any SAS query string" } },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a) => fetchUrl(a),
+  },
   list_files: {
     spec: {
       type: "function",
@@ -553,7 +656,11 @@ const FINISH_TOOL: ToolSpec = {
   },
 };
 
-// ── dispatch — the single entry point (the airlock gate) ──────────────────
+// ── dispatch — the single entry point (per-role scoping gate) ─────────────
+//
+// This is least-privilege hygiene (a role only sees the tools its .md grants),
+// not a trust boundary: everything in CATALOG is a legitimate orchestrator
+// capability, and new ones are added here as the toolbox grows.
 
 export async function dispatch(
   toolName: string,
@@ -562,7 +669,7 @@ export async function dispatch(
   ws: string,
   ctx?: { userId?: string },
 ): Promise<ToolResult> {
-  if (!allowed.includes(toolName)) return err("unknown_tool", `no such tool in this role's catalog: ${toolName}`);
+  if (!allowed.includes(toolName)) return err("unknown_tool", `tool not granted to this role: ${toolName}`);
   return await CATALOG[toolName].run(args, ws, ctx);
 }
 

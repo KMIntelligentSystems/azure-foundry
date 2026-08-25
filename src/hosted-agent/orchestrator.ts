@@ -2,13 +2,13 @@
  * orchestrator.ts — the outer loop. planner → validate_plan → execute steps
  * → finish. Chunk 1: roles have NO tools; execution is one Responses call per
  * step whose final text becomes that step's output. Tool catalogs land in
- * chunk 3 (broker.ts).
+ * chunk 3 (toolbox.ts).
  */
 import { callLlm } from "./foundry.js";
 import { plan, type Plan, type PlanStep, DEPLOYMENT_ALIAS } from "./planner.js";
 import { validatePlan } from "./validate_plan.js";
 import { getRole } from "./imports.js";
-import { runRole } from "./broker.js";
+import { runRole } from "./toolbox.js";
 import { collectArtifacts, renderPendingTree, type ArtifactRef } from "./artifacts.js";
 import {
   loadSession,

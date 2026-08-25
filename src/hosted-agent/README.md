@@ -33,7 +33,7 @@ registered via the SDK, invoked over the Invocations protocol.
 
 ## Chunk 1 — the LLM spine (2026-08-19, WORKS)
 
-`planner → validate_plan → execute steps → response` — no tools, no broker yet.
+`planner → validate_plan → execute steps → response` — no tools, no tool runtime yet.
 
 | Module | Role |
 |---|---|
@@ -61,11 +61,23 @@ inherits turn 1's findings. First pass failed ("No data was provided") — summa
 described steps but not outputs; fixed by including compact outputs (the packing rule:
 planner gets state, steps get upstream).
 
-## Chunk 3 — the deterministic broker (2026-08-19, WORKS)
+## Chunk 3 — the tool runtime (2026-08-19, WORKS; renamed broker→toolbox 2026-08-26)
+
+> **Architecture correction (2026-08-26):** this chunk was originally framed as
+> "the deterministic broker / in-process airlock". That misapplied the flow-2
+> oracle/airlock trust split to this flow-1 interactive container. In the
+> source app (http_proxy) the interactive flow (React → host → orchestrator
+> agent) has an OPEN tool set and NO broker; the airlock lives only in flow 2
+> (source oracle = Rust daemon `daemon-airlock` in ACA; target oracle =
+> http_proxy's `src/refresh`). The module is now **`toolbox.ts`**: per-role
+> tool lists + budgets remain as least-privilege scoping and cost discipline
+> (LLM proposes, runtime disposes), but the catalog is an orchestrator toolbox
+> that grows with ordinary capabilities without airlock justification — it
+> holds no signing keys or secrets. The SWA does not depend on the airlock.
 
 | Module | Role |
 |---|---|
-| `broker.ts` | the in-process airlock. Closed tool catalog (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), `dispatch()` gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
+| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), `dispatch()` scoping gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
 | `roles/reader.md` | first tools-bearing role |
 | orchestrator | executeStep → `runRole` (real tool loops, not single calls) |
 
@@ -73,13 +85,13 @@ planner gets state, steps get upstream).
 confirmed it across two steps sharing the workspace. `scripts/smoke-chunk3b.ts` — four
 gates pass: unknown_tool, catalog gate, path_escape, unpriced-deployment refusal.
 **Wire fix:** Responses API requires raw `function_call` items echoed into `input` before
-`function_call_output` items (`foundry.ts` now returns `rawOutput`; broker echoes it).
+`function_call_output` items (`foundry.ts` now returns `rawOutput`; the runtime echoes it).
 
 ## Chunk 4 — execute_python + statistician (2026-08-19, WORKS)
 
 | Module | Role |
 |---|---|
-| `broker.ts` | `execute_python` tool: scrubbed env, cwd=workspace, 60s kill, `py -I` (Linux adds rlimits), stdout contract |
+| `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, 60s kill, `py -I` (Linux adds rlimits), stdout contract |
 | `roles/statistician.md` | defaultDeployment gpt-4.1, tools incl. execute_python |
 | `Dockerfile.agent` | python3 + pinned numpy/pandas/statsmodels/scikit-learn (full-bookworm base) |
 | `validate_plan.ts` | partial rejection is non-fatal: surviving steps proceed, dropped steps reported as validationErrors |
@@ -93,7 +105,7 @@ prompt-tuning item (gpt-4.1 planner over-genericizes); roles work when invoked.
 
 | Module | Role |
 |---|---|
-| `broker.ts` | `render_validate` tool: Playwright Chromium loads a workspace HTML file, counts SVG children, collects console/page errors, returns `valid`. Async dispatch. |
+| `toolbox.ts` | `render_validate` tool: Playwright Chromium loads a workspace HTML file, counts SVG children, collects console/page errors, returns `valid`. Async dispatch. |
 | `roles/coder.md` | D3 chart role: dark theme, embedded data, validate-after-write protocol |
 | `Dockerfile.agent` | `npx playwright install --with-deps chromium` (browser baked into image) |
 
@@ -130,7 +142,7 @@ indicator_history; (2) let the orchestrator invoke the same
 | Module | Role |
 |---|---|
 | artifact-service `POST /refresh-sync` (daemon repo) | server-side bridge: tagged text/csv catalog rows → baked-in `data/series-map.json` allowlist → YYYY-MM normalization → HMAC-signed POST to `$REFRESH_DAEMON_URL/refresh/bootstrap`. Admin-role gated. |
-| broker `sync_indicator_history` | thin wrapper in the broker's CATALOG; only ever sees the SyncReport — the LLM cannot author bytes for the refresh target. Same trust shape as http_proxy's orchestrator tool. |
+| toolbox `sync_indicator_history` | thin wrapper in the toolbox's CATALOG; only ever sees the SyncReport — the LLM cannot author bytes for the refresh target. Same trust shape as http_proxy's orchestrator tool. The actual gate is server-side at the artifact-service (admin role + HMAC), not in this file. |
 | `roles/operator.md` | system-operator role with catalog limited to `sync_indicator_history`; routes "sync the backbone" prompts. |
 | `scripts/smoke-refresh-sync.ts` | stub artifact-service gate test: dispatch passes dryRun + admin header, non-listed roles rejected, non-OK → sync_failed. |
 
@@ -142,6 +154,24 @@ both.
 **Proven:** daemon repo `artifact-service npm test` (12/12 — stub refresh-daemon
 verifies HMAC + YYYY-MM normalization); azure repo `npx tsx scripts/smoke-refresh-sync.ts`
 (6/6 — dispatch gates + role registration).
+
+## Chunk 9 — fetch_url: the reader's web plane (2026-08-26, WORKS)
+
+Motivation: a user pasted a SAS-signed Azure blob URL
+(`daemonstore.blob.core.windows.net/prompts/...`) and asked the SWA app to
+fetch it; the reader had no network verb and correctly answered "I am unable
+to fetch files from external URLs". Closed catalog = closed world.
+
+| Module | Role |
+|---|---|
+| toolbox `fetch_url` | GET one external URL, streamed body capped at 256KB (100k chars to the model), 30s timeout. Guards: http(s) only, loopback/private hosts refused (incl. IMDS 169.254.169.254), optional `FETCH_URL_ALLOWLIST` env (comma-separated host suffixes) tightens further. Redirect targets are not re-checked (documented gap). |
+| `roles/reader.md` | tools += `fetch_url`; protocol gains THE WEB plane — fetch the FULL URL including the SAS query string; never claim a URL is unfetchable without trying the tool. |
+| `scripts/smoke-fetch.ts` | dispatch-level gates: real SAS blob fetch, IMDS refused, non-http(s) refused, catalog gate for unlisted roles, allowlist refusal. |
+
+Deploy: rebuild the image (`az acr build`) + register a new version
+(`AGENT_NAME=orchestrator AGENT_IMAGE=...:0.2.0 npx tsx src/agents/register.ts`);
+the SWA API function resolves the highest published version, so no SWA
+redeploy is needed.
 
 ## State of play
 
