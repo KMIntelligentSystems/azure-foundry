@@ -16,7 +16,9 @@ const ALLOWED_ORIGINS = (process.env["ALLOWED_ORIGINS"] ?? "")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const ALLOW_INSECURE_USER_ID = process.env["ALLOW_INSECURE_USER_ID"] === "true";
 const CLIENT_ID = process.env["ACA_GATEWAY_CLIENT_ID"] ?? "";
-const OPENID_CONFIG = process.env["OPENID_CONFIG_URL"] ?? "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration";
+const TENANT_ID = process.env["ENTRA_TENANT_ID"] ?? "";
+const ADMIN_OBJECT_IDS = new Set((process.env["ADMIN_OBJECT_IDS"] ?? "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean));
+const OPENID_CONFIG = process.env["OPENID_CONFIG_URL"] ?? `https://login.microsoftonline.com/${TENANT_ID || "common"}/v2.0/.well-known/openid-configuration`;
 
 interface PromptMessage {
   type: "prompt";
@@ -65,7 +67,7 @@ async function authenticate(message: PromptMessage): Promise<AuthenticatedUser> 
     if (!id) throw new Error("user_id is required in insecure local mode");
     return { id, claims: {} };
   }
-  if (!CLIENT_ID) throw new Error("ACA_GATEWAY_CLIENT_ID is not configured");
+  if (!CLIENT_ID || !TENANT_ID) throw new Error("ACA_GATEWAY_CLIENT_ID and ENTRA_TENANT_ID must be configured");
   const token = String(message.access_token ?? "");
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("access_token is required");
@@ -81,13 +83,19 @@ async function authenticate(message: PromptMessage): Promise<AuthenticatedUser> 
   if (!verified) throw new Error("invalid access_token signature");
   const now = Math.floor(Date.now() / 1000);
   if (typeof claims["exp"] !== "number" || claims["exp"] <= now) throw new Error("access_token expired");
+  if (claims["tid"] !== TENANT_ID) throw new Error("access_token tenant mismatch");
+  const acceptedIssuers = new Set([`https://login.microsoftonline.com/${TENANT_ID}/v2.0`, `https://sts.windows.net/${TENANT_ID}/`]);
+  if (typeof claims["iss"] !== "string" || !acceptedIssuers.has(claims["iss"])) throw new Error("access_token issuer mismatch");
   const aud = claims["aud"];
   const acceptedAudiences = new Set([CLIENT_ID, `api://${CLIENT_ID}`]);
   if (!(typeof aud === "string" && acceptedAudiences.has(aud)) &&
       !(Array.isArray(aud) && aud.some((value) => typeof value === "string" && acceptedAudiences.has(value)))) {
     throw new Error("access_token audience mismatch");
   }
-  const id = String(claims["preferred_username"] ?? claims["oid"] ?? claims["sub"] ?? "").trim().toLowerCase();
+  const objectId = String(claims["oid"] ?? "").trim().toLowerCase();
+  const id = ADMIN_OBJECT_IDS.has(objectId)
+    ? "admin"
+    : String(claims["preferred_username"] ?? objectId ?? claims["sub"] ?? "").trim().toLowerCase();
   if (!id) throw new Error("access_token has no stable user identity");
   return { id, claims };
 }

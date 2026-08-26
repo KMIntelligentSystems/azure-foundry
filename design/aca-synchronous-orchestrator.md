@@ -38,9 +38,11 @@ introduced. Progress events and the final result travel over the same socket.
   or `error`.
 - Configure `ALLOWED_ORIGINS` in ACA as a comma-separated exact list containing
   the production SWA origin.
-- Configure `ACA_GATEWAY_CLIENT_ID`; the first prompt message must carry an
-  Entra access token whose signature, expiration, and audience are verified by
-  the gateway. The React client acquires it with MSAL using
+- Configure `ACA_GATEWAY_CLIENT_ID` and `ENTRA_TENANT_ID`; the first prompt
+  message must carry an Entra access token whose signature, expiration,
+  issuer, tenant, and audience are verified by the gateway. `ADMIN_OBJECT_IDS`
+  maps selected Entra object IDs to the existing `admin` catalog identity.
+  The React client acquires the token with MSAL using
   `VITE_ENTRA_TENANT_ID`, `VITE_ENTRA_CLIENT_ID`, and `VITE_GATEWAY_SCOPE`.
   `ALLOW_INSECURE_USER_ID=true` exists only for local development.
 - Configure the React build variable `VITE_AGENT_WS_URL` to the ACA ingress URL,
