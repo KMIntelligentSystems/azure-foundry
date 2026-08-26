@@ -33,6 +33,12 @@ api_location: "src/api"
 output_location: "dist"
 ```
 
+## 3a. host.json timeouts (the 500 trap)
+
+`src/api/host.json` carries `functionTimeout: "00:08:00"`. **Do not delete** —
+the orchestrator's ADL/statistician loop takes 30–60s+; without it the SWA
+Function dies at Azure's default 30s window and the browser sees 500.
+
 ## 4. Set secrets
 
 In GitHub repo → Settings → Secrets:
