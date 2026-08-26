@@ -21,6 +21,11 @@ jobs:
           lfs: false
       - name: Build And Deploy
         id: builddeploy
+        env:
+          VITE_AGENT_WS_URL: wss://foundry-orchestrator-gateway.bravesea-f16a8310.eastus.azurecontainerapps.io/ws/agent
+          VITE_ENTRA_TENANT_ID: 861d72fc-cfd3-4e7c-b2cb-128bc7b85add
+          VITE_ENTRA_CLIENT_ID: e9a5563e-df5e-47df-816b-ba4ab9501904
+          VITE_GATEWAY_SCOPE: api://094bea17-5f7e-4ab9-8156-1aac4b4650ad/access_as_user
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_FOREST_04E89460F }}
