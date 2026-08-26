@@ -33,11 +33,18 @@ api_location: "src/api"
 output_location: "dist"
 ```
 
-## 3a. host.json timeouts (the 500 trap)
+## 3a. Interactive agent transport
 
-`src/api/host.json` carries `functionTimeout: "00:08:00"`. **Do not delete** —
-the orchestrator's ADL/statistician loop takes 30–60s+; without it the SWA
-Function dies at Azure's default 30s window and the browser sees 500.
+The production React app connects directly to the ACA synchronous WebSocket
+gateway. Set `VITE_AGENT_WS_URL` in the frontend build environment to:
+
+```text
+wss://<aca-gateway-fqdn>/ws/agent
+```
+
+Do not route long interactive turns through `/api/invoke`; that managed
+Function is retained only as a compatibility/direct-test surface. The gateway
+deployment contract is in `design/aca-synchronous-orchestrator.md`.
 
 ## 4. Set secrets
 

@@ -5,6 +5,12 @@
 LLM → sub-agents → Python statistics → D3 charts + Playwright validation →
 pending-tree text. No deference to pi/azd; code-first, /invocations surface.
 
+**Implementation update — 2026-08-26:**
+- Runtime role documents now ship from `src/hosted-agent/agents`; application-owned behavioral method documents ship from `src/hosted-agent/skills`. These are container resources, not pi-harness paths or Foundry-native skill resources.
+- The statistician discovers/reads `SKILL.md` and calls generic `execute_python` with `stage_indicator_panel`; raw observations are written into the workspace before Python starts and are not echoed into LLM context.
+- Planning is iterative (Option B): discovery rounds set `continuePlanning=true`; their outputs return to the planner before downstream roles are selected.
+- The synchronous browser transport is the ACA WebSocket gateway in `src/aca-gateway/server.ts` / `Dockerfile.gateway`, not the SWA managed Function and not Foundry `invocations_ws`. See `design/aca-synchronous-orchestrator.md`.
+
 **Decisions locked so far:**
 - Hosted agent (`kind:"hosted"`) for the orchestrator container; daemons stay in ACA.
 - Invocations protocol hand-rolled in TS (no Py/.NET agentserver libs).
@@ -49,14 +55,14 @@ models come ONLY from the runtime's deployment allowlist.
 src/hosted-agent/
   server.ts        # /readiness + POST /invocations (exists, hello-grade)
   session.ts       # conversation_id → session state (persist in $HOME/files)
-  imports.ts       # role catalogue loader: roles/*.md → {name, defaultDeployment,
+  imports.ts       # role catalogue loader: agents/*.md → {name, defaultDeployment,
                    #   instructions, toolSchemas[]} compiled at startup
   planner.ts       # callPlanner + tool schema for emit_plan
   validate_plan.ts # THE GATE (below)
   toolbox.ts       # dispatch(toolCall) → execute in-container (per-role tool lists)
   executor.ts      # the delegate loop: validate → callRole over Responses →
                    #   route its tools through dispatch() → collect outputs → return to orchestrator
-  orchestrator.ts  # outer loop: planner → validate_plan → executor → finish
+  orchestrator.ts  # iterative outer loop: planner → validate → execute → replan|finish
   respond.ts       # response formatter (pending tree)
 validator & budgetinvariants:
   - DeploymentAllowlist: [{ name, roles:[*]|roles-limited, kind: planner|worker }]
@@ -81,7 +87,7 @@ validator & budgetinvariants:
 
 ### 4. Context assembly per call (what the model actually sees)
 ```
-instructions  = role.instructions (from roles/*.md frontmatter/body)
+instructions  = role.instructions (from agents/*.md frontmatter/body)
 input         = [ task, upstream artifact contents (full <3KB / excerpted),
                   relevant memory artifacts, current state summary ]
 tools         = role.toolSchemas (+ delegate/finish for orchestrator)
@@ -91,8 +97,9 @@ catalog (planner only) = roles + deployment zoo + cost hints, so the planner's
 
 ### 5. Artifacts & the React contract
 ```
-prompt arrives    = POST /invocations body: { conversation_id, promptText } |
-                    { conversation_id, promptRef }
+prompt arrives    = ACA WebSocket /ws/agent message:
+                    { type:"prompt", conversation_id, promptText, user_id }
+                    (Foundry POST /invocations remains a direct agent/test surface)
 charts/datasets   = uploaded to existing artifact service (host /ui/api/artifacts,
                     HMAC'd) — React app unchanged; response carries artifact ids
 pending tree      = plain-text in the finish() response (Parts A–E groupings)

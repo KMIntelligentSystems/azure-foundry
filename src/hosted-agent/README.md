@@ -38,7 +38,7 @@ registered via the SDK, invoked over the Invocations protocol.
 | Module | Role |
 |---|---|
 | `foundry.ts` | the ONLY LLM caller; agent-identity token cached; stateless `store:false` |
-| `imports.ts` | roles/*.md → compiled catalogue (researcher.md, writer.md — echo-class) |
+| `imports.ts` | agents/*.md → compiled catalogue (researcher.md, writer.md — echo-class) |
 | `planner.ts` | call 1: structured `emit_plan`; planner/worker deployment allowlist |
 | `validate_plan.ts` | pure gate: role existence, planner-deployments-can't-work, ≤5 steps |
 | `orchestrator.ts` | sequential step execution (chain passes upstream outputs forward) |
@@ -78,7 +78,7 @@ planner gets state, steps get upstream).
 | Module | Role |
 |---|---|
 | `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), `dispatch()` scoping gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
-| `roles/reader.md` | first tools-bearing role |
+| `agents/reader.md` | first tools-bearing role |
 | orchestrator | executeStep → `runRole` (real tool loops, not single calls) |
 
 **Proven:** `scripts/smoke-chunk3.ts` — reader wrote `notes/hello.txt` then re-read and
@@ -92,7 +92,7 @@ gates pass: unknown_tool, catalog gate, path_escape, unpriced-deployment refusal
 | Module | Role |
 |---|---|
 | `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, 60s kill, `py -I` (Linux adds rlimits), stdout contract |
-| `roles/statistician.md` | defaultDeployment gpt-4.1, tools incl. execute_python |
+| `agents/statistician.md` | defaultDeployment gpt-4.1, tools incl. execute_python |
 | `Dockerfile.agent` | python3 + pinned numpy/pandas/statsmodels/scikit-learn (full-bookworm base) |
 | `validate_plan.ts` | partial rejection is non-fatal: surviving steps proceed, dropped steps reported as validationErrors |
 
@@ -106,7 +106,7 @@ prompt-tuning item (gpt-4.1 planner over-genericizes); roles work when invoked.
 | Module | Role |
 |---|---|
 | `toolbox.ts` | `render_validate` tool: Playwright Chromium loads a workspace HTML file, counts SVG children, collects console/page errors, returns `valid`. Async dispatch. |
-| `roles/coder.md` | D3 chart role: dark theme, embedded data, validate-after-write protocol |
+| `agents/coder.md` | D3 chart role: dark theme, embedded data, validate-after-write protocol |
 | `Dockerfile.agent` | `npx playwright install --with-deps chromium` (browser baked into image) |
 
 **Proven** (`scripts/smoke-chunk5.ts`): coder wrote `charts/line.html` (D3 line
@@ -143,7 +143,7 @@ indicator_history; (2) let the orchestrator invoke the same
 |---|---|
 | artifact-service `POST /refresh-sync` (daemon repo) | server-side bridge: tagged text/csv catalog rows → baked-in `data/series-map.json` allowlist → YYYY-MM normalization → HMAC-signed POST to `$REFRESH_DAEMON_URL/refresh/bootstrap`. Admin-role gated. |
 | toolbox `sync_indicator_history` | thin wrapper in the toolbox's CATALOG; only ever sees the SyncReport — the LLM cannot author bytes for the refresh target. Same trust shape as http_proxy's orchestrator tool. The actual gate is server-side at the artifact-service (admin role + HMAC), not in this file. |
-| `roles/operator.md` | system-operator role with catalog limited to `sync_indicator_history`; routes "sync the backbone" prompts. |
+| `agents/operator.md` | system-operator role with catalog limited to `sync_indicator_history`; routes "sync the backbone" prompts. |
 | `scripts/smoke-refresh-sync.ts` | stub artifact-service gate test: dispatch passes dryRun + admin header, non-listed roles rejected, non-OK → sync_failed. |
 
 Deployment wiring: the artifact-service ACA app needs `REFRESH_DAEMON_URL`
@@ -165,7 +165,7 @@ to fetch files from external URLs". Closed catalog = closed world.
 | Module | Role |
 |---|---|
 | toolbox `fetch_url` | GET one external URL, streamed body capped at 256KB (100k chars to the model), 30s timeout. Guards: http(s) only, loopback/private hosts refused (incl. IMDS 169.254.169.254), optional `FETCH_URL_ALLOWLIST` env (comma-separated host suffixes) tightens further. Redirect targets are not re-checked (documented gap). |
-| `roles/reader.md` | tools += `fetch_url`; protocol gains THE WEB plane — fetch the FULL URL including the SAS query string; never claim a URL is unfetchable without trying the tool. |
+| `agents/reader.md` | tools += `fetch_url`; protocol gains THE WEB plane — fetch the FULL URL including the SAS query string; never claim a URL is unfetchable without trying the tool. |
 | `scripts/smoke-fetch.ts` | dispatch-level gates: real SAS blob fetch, IMDS refused, non-http(s) refused, catalog gate for unlisted roles, allowlist refusal. |
 
 Deploy: rebuild the image (`az acr build`) + register a new version
@@ -204,6 +204,26 @@ verified 2/2 on the SAS-blob fetch prompt. Hardenings from the deploy:
   (cp1252 UnicodeEncodeError) while the remote build succeeds — check
   `az acr repository show-tags`, don't re-run.
 
+## Chunk 12 — behavioral skills + Python staging + iterative planning + ACA sync transport (2026-08-26)
+
+The full interactive architecture now preserves the source agent/skill split:
+
+| Layer | Contract |
+|---|---|
+| `src/hosted-agent/agents` | application-owned role prompts and tool grants; copied into both runtime images |
+| `src/hosted-agent/skills` | application-owned behavioral method documents; the statistician calls `list_skills` + `read_skill` before authoring Python; not pi or Foundry-native resources |
+| `execute_python(stage_indicator_panel=...)` | fetches `/refresh-panel`, atomically stages raw rows in the conversation workspace, then starts agent-authored Python; tool output exposes only hash/count/range metadata + stdout |
+| iterative planner | plans carry `continuePlanning`; prompt/artifact discovery executes first and returns to the planner before substantive role selection |
+| ACA gateway | `/ws/agent` keeps one synchronous browser turn open and streams planning/step events plus the final result; it is not a polling job and does not use `invocations_ws` |
+
+Architecture smoke: `npm run test:architecture`. ACA source and deployment contract:
+`src/aca-gateway/server.ts`, `Dockerfile.gateway`, and
+`design/aca-synchronous-orchestrator.md`.
+
+The old summary-only `read_indicator_panel` verb remains for reader/diagnostic
+compatibility, but it is no longer granted to the statistician. Statistical
+panel work must enter through the Python staging argument.
+
 ## Chunk 11 — read_indicator_panel: the azure parity loop closes (2026-08-26, WORKS)
 
 The ADL nowcast prompt assumed the http_proxy ambient-file idiom
@@ -214,7 +234,7 @@ read — "upload refresh.db" was the worker's only imagined source. Fixed:
 |---|---|
 | artifact-service `/refresh-panel` (daemon repo, admin-gated) | read-only open of the SHARED Azure-Files volume (`REFRESH_DB_PATH=/data/refresh.db`). SELECT → deterministic ordering + `sha256` panelHash. The refresh-daemon owns writes; the artifact-service is the only read surface. |
 | azure-foundry `read_indicator_panel` verb | forwards subject+series to artifact-service; returns SHAPED summary (series, ranges, obs counts, hash) — never raw rows |
-| roles/statistician + roles/reader | grant the verb; protocol says call it BEFORE execute_python, never say "upload refresh.db" |
+| agents/statistician + agents/reader | grant the verb; protocol says call it BEFORE execute_python, never say "upload refresh.db" |
 | planner | explicit rule: indicator-panel + statistics → route to statistician |
 
 Verified through the SWA on version 9: 13-series ADL panel summary, panels

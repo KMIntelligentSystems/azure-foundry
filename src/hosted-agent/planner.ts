@@ -15,6 +15,8 @@ export interface PlanStep {
 export interface Plan {
   steps: PlanStep[];
   rationale: string;
+  /** True when execution should return to the planner after these steps. */
+  continuePlanning: boolean;
 }
 
 export interface DeploymentEntry {
@@ -59,6 +61,13 @@ RULES:
 - Output exactly one call to emit_plan. No prose, no other tools.
 - 1-5 steps. Each step: role (from the list), task (self-contained instruction),
   deployment (a WORKER deployment; never a planner one).
+- Set continuePlanning=true whenever a step discovers information that is
+  required to choose later work: resolving a prompt file/URL, inspecting an
+  unknown artifact, or researching a source. In that case emit ONLY the
+  discovery step(s). The orchestrator will execute them, return their outputs
+  and workspace state to you, and ask you for the next plan. Do not guess the
+  downstream role before discovery is complete.
+- Set continuePlanning=false only when these steps complete the user's request.
 - SELF-CONTAINED means VERBATIM: the worker sees ONLY the task text. Every URL
   (INCLUDING its full query string — SAS signatures live there), artifact id,
   file path, or exact instruction the step needs must be copied INTO the task
@@ -73,9 +82,10 @@ RULES:
 PROMPT FILES: reusable prompt documents live in the artifact catalog as
 text/markdown artifacts tagged "prompt" (category "Prompts"). When the user
 references a prompt file by name (e.g. "run the aug-2026-ADL prompt" or
-"/prompts/aug-2026-ADL.md"), make the FIRST step a reader step that lists
-artifacts tagged "prompt" and reads the matching one; the following step(s)
-then execute the instructions it contains.`;
+"/prompts/aug-2026-ADL.md"), emit ONLY a reader step that lists prompt-tagged
+artifacts and reads the matching one, with continuePlanning=true. On the next
+planning round the resolved contents will be in PRIOR EXECUTION RESULTS; then
+plan the statistician/coder work required by those contents.`;
 }
 
 const EMIT_PLAN_TOOL = {
@@ -87,6 +97,7 @@ const EMIT_PLAN_TOOL = {
     type: "object",
     properties: {
       rationale: { type: "string", description: "One sentence on the allocation." },
+      continuePlanning: { type: "boolean", description: "Whether the orchestrator must execute these steps and ask the planner for another plan." },
       steps: {
         type: "array",
         items: {
@@ -101,12 +112,12 @@ const EMIT_PLAN_TOOL = {
         },
       },
     },
-    required: ["rationale", "steps"],
+    required: ["rationale", "continuePlanning", "steps"],
     additionalProperties: false,
   },
 };
 
-/** Call 1: prompt → raw plan (unvalidated). */
+/** One planning round: prompt + prior/round context → raw plan. */
 export async function plan(prompt: string, priorContext = "(no prior turns)"): Promise<Plan> {
   const res = await callLlm({
     model: PLANNER_DEPLOYMENT,
@@ -126,6 +137,7 @@ export async function plan(prompt: string, priorContext = "(no prior turns)"): P
   }
   return {
     rationale: String(call.args["rationale"] ?? ""),
+    continuePlanning: call.args["continuePlanning"] === true,
     steps: (call.args["steps"] as PlanStep[] | undefined) ?? [],
   };
 }

@@ -1,10 +1,10 @@
 /**
- * orchestrator.ts — the outer loop. planner → validate_plan → execute steps
- * → finish. Chunk 1: roles have NO tools; execution is one Responses call per
- * step whose final text becomes that step's output. Tool catalogs land in
- * chunk 3 (toolbox.ts).
+ * Iterative orchestrator: planner → validate → execute → replan as needed.
+ *
+ * Discovery is a first-class round. A reader can resolve a prompt/artifact,
+ * return it to the planner, and only then does the planner choose substantive
+ * statistician/coder work. All rounds remain inside one synchronous turn.
  */
-import { callLlm } from "./foundry.js";
 import { plan, type Plan, type PlanStep, DEPLOYMENT_ALIAS } from "./planner.js";
 import { validatePlan } from "./validate_plan.js";
 import { getRole } from "./imports.js";
@@ -17,18 +17,23 @@ import {
   type SessionState,
   type TurnRecord,
 } from "./session.js";
+import type { AgentEventSink } from "./events.js";
 
 export interface StepResult {
   role: string;
   deployment: string;
+  task: string;
   output: string;
   usage: { input: number; output: number };
+  round: number;
 }
 
 export interface OrchestratorResult {
   ok: boolean;
   conversationId: string;
+  /** Flattened aggregate retained for React/backward compatibility. */
   plan?: Plan;
+  plans?: Plan[];
   validationErrors?: string[];
   steps?: StepResult[];
   artifacts?: ArtifactRef[];
@@ -37,79 +42,157 @@ export interface OrchestratorResult {
 }
 
 const MAX_STEP_OUTPUT_CHARS = 6_000;
+const MAX_PLANNING_ROUNDS = 6;
 
-async function executeStep(step: PlanStep, upstream: StepResult[], conversationId: string, userId?: string): Promise<StepResult> {
-  const role = getRole(step.role);
-  if (!role) throw new Error(`role '${step.role}' vanished after validation`);
-  const upstreamText =
-    upstream.length === 0
-      ? "(no upstream results)"
-      : upstream.map((u) => `--- ${u.role} ---\n${u.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`).join("\n");
-  const actualDeployment = DEPLOYMENT_ALIAS[step.deployment] ?? step.deployment;
-  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, undefined, { userId });
-  // Report the alias (what the plan asked for), not the mapped target.
-  return { role: step.role, deployment: step.deployment, output: res.output, usage: res.usage };
+async function emit(sink: AgentEventSink | undefined, event: Parameters<AgentEventSink>[0]): Promise<void> {
+  await sink?.(event);
 }
 
-export async function orchestrate(prompt: string, conversationId?: string, userId?: string): Promise<OrchestratorResult> {
+async function executeStep(
+  step: PlanStep,
+  upstream: StepResult[],
+  conversationId: string,
+  round: number,
+  userId?: string,
+): Promise<StepResult> {
+  const role = getRole(step.role);
+  if (!role) throw new Error(`role '${step.role}' vanished after validation`);
+  const upstreamText = upstream.length === 0
+    ? "(no upstream results)"
+    : upstream.map((u) => `--- round ${u.round}: ${u.role} ---\n${u.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`).join("\n");
+  const actualDeployment = DEPLOYMENT_ALIAS[step.deployment] ?? step.deployment;
+  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, undefined, { userId });
+  return { role: step.role, deployment: step.deployment, task: step.task, output: res.output, usage: res.usage, round };
+}
+
+function plannerRoundContext(session: SessionState, steps: StepResult[]): string {
+  const prior = summarizePrior(session);
+  if (steps.length === 0) return prior;
+  const current = steps.map((step) =>
+    `--- round ${step.round}: ${step.role} [${step.deployment}] ---\nTASK: ${step.task}\nOUTPUT:\n${step.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`,
+  ).join("\n\n");
+  return `${prior}\n\nCURRENT TURN EXECUTION RESULTS:\n${current}\n\nWorkspace files produced by these steps persist for the next round.`;
+}
+
+export async function orchestrate(
+  prompt: string,
+  conversationId?: string,
+  userId?: string,
+  eventSink?: AgentEventSink,
+): Promise<OrchestratorResult> {
   const totals = { input: 0, output: 0 };
   const id = conversationId && conversationId.trim() ? conversationId : `anon-${Date.now()}`;
   const session = loadSession(id);
-
-  // Call 1: planner (strong deployment, structured plan only). Prior turns are
-  // part of the planner's context — the LLM sees nothing we don't give it.
-  const rawPlan = await plan(prompt, summarizePrior(session));
-
-  // THE GATE — no worker token is spent before this passes.
-  const verdict = validatePlan(rawPlan);
-  if (!verdict.ok) {
-    record(session, prompt, rawPlan, [], totals, false);
-    return {
-      ok: false,
-      conversationId: id,
-      plan: rawPlan,
-      validationErrors: verdict.errors,
-      response: `Plan rejected by validator: ${verdict.errors.join("; ")}`,
-      totals,
-    };
-  }
-
-  // Execute steps sequentially (chunk 1: simple chain; parallelism is a later decision)
+  const plans: Plan[] = [];
   const steps: StepResult[] = [];
-  for (const step of verdict.plan.steps) {
-    const r = await executeStep(step, steps, id, userId);
-    totals.input += r.usage.input;
-    totals.output += r.usage.output;
-    steps.push(r);
+  const validationErrors: string[] = [];
+
+  await emit(eventSink, { type: "agent_start", conversationId: id, prompt });
+
+  try {
+    for (let round = 1; round <= MAX_PLANNING_ROUNDS; round++) {
+      await emit(eventSink, { type: "planning_start", conversationId: id, round });
+      const rawPlan = await plan(prompt, plannerRoundContext(session, steps));
+      const verdict = validatePlan(rawPlan);
+      plans.push(verdict.plan);
+      validationErrors.push(...verdict.errors.map((error) => `round ${round}: ${error}`));
+
+      await emit(eventSink, {
+        type: "plan",
+        conversationId: id,
+        round,
+        rationale: verdict.plan.rationale,
+        continuePlanning: verdict.plan.continuePlanning,
+        steps: verdict.plan.steps,
+      });
+      if (verdict.errors.length) {
+        await emit(eventSink, { type: "validation", conversationId: id, round, errors: verdict.errors });
+      }
+
+      if (!verdict.ok) {
+        record(session, prompt, plans, steps, totals, false);
+        await emit(eventSink, { type: "agent_end", conversationId: id, ok: false });
+        return {
+          ok: false,
+          conversationId: id,
+          plan: aggregatePlan(plans),
+          plans,
+          validationErrors,
+          steps,
+          response: `Plan rejected by validator: ${verdict.errors.join("; ")}`,
+          totals,
+        };
+      }
+
+      for (let index = 0; index < verdict.plan.steps.length; index++) {
+        const step = verdict.plan.steps[index];
+        await emit(eventSink, {
+          type: "step_start", conversationId: id, round, index,
+          role: step.role, deployment: step.deployment, task: step.task,
+        });
+        const result = await executeStep(step, steps, id, round, userId);
+        totals.input += result.usage.input;
+        totals.output += result.usage.output;
+        steps.push(result);
+        await emit(eventSink, {
+          type: "step_end", conversationId: id, round, index,
+          role: result.role, deployment: result.deployment,
+          output: result.output, usage: result.usage,
+        });
+      }
+
+      if (!verdict.plan.continuePlanning) {
+        record(session, prompt, plans, steps, totals, true);
+        const artifacts = collectArtifacts(id);
+        const response = formatResponse(plans, validationErrors, steps, artifacts);
+        await emit(eventSink, { type: "agent_end", conversationId: id, ok: true });
+        return {
+          ok: true,
+          conversationId: id,
+          plan: aggregatePlan(plans),
+          plans,
+          ...(validationErrors.length ? { validationErrors } : {}),
+          steps,
+          artifacts,
+          response,
+          totals,
+        };
+      }
+
+      await emit(eventSink, { type: "replanning", conversationId: id, round });
+    }
+
+    throw new Error(`iterative planner exceeded ${MAX_PLANNING_ROUNDS} rounds without a terminal plan`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    record(session, prompt, plans, steps, totals, false);
+    await emit(eventSink, { type: "agent_error", conversationId: id, error: message });
+    throw error;
   }
+}
 
-  record(session, prompt, verdict.plan, steps, totals, true);
+function aggregatePlan(plans: Plan[]): Plan {
+  return {
+    rationale: plans.map((p, i) => `Round ${i + 1}: ${p.rationale}`).join(" | "),
+    continuePlanning: false,
+    steps: plans.flatMap((p) => p.steps),
+  };
+}
 
-  const artifacts = collectArtifacts(id);
-  const response = [
-    `PLAN: ${verdict.plan.rationale}`,
-    ...(verdict.errors.length > 0 ? [`VALIDATOR NOTES: ${verdict.errors.join("; ")}`, ``] : []),
-    ...steps.map((s, i) => `STEP ${i + 1} [${s.role} on ${s.deployment}]\n${s.output}`),
-    ``,
+function formatResponse(plans: Plan[], errors: string[], steps: StepResult[], artifacts: ArtifactRef[]): string {
+  return [
+    ...plans.map((p, i) => `PLAN ROUND ${i + 1}: ${p.rationale}${p.continuePlanning ? " (replan after execution)" : ""}`),
+    ...(errors.length ? [`VALIDATOR NOTES: ${errors.join("; ")}`, ""] : []),
+    ...steps.map((s, i) => `STEP ${i + 1} / ROUND ${s.round} [${s.role} on ${s.deployment}]\n${s.output}`),
+    "",
     renderPendingTree(artifacts),
   ].join("\n");
-
-  return {
-    ok: true,
-    conversationId: id,
-    plan: verdict.plan,
-    ...(verdict.errors.length > 0 ? { validationErrors: verdict.errors } : {}),
-    steps,
-    artifacts,
-    response,
-    totals,
-  };
 }
 
 function record(
   session: SessionState,
   prompt: string,
-  plan: Plan,
+  plans: Plan[],
   steps: StepResult[],
   totals: { input: number; output: number },
   ok: boolean,
@@ -117,12 +200,12 @@ function record(
   const turn: TurnRecord = {
     at: new Date().toISOString(),
     prompt,
-    planRationale: plan.rationale,
+    planRationale: plans.map((p, i) => `Round ${i + 1}: ${p.rationale}`).join(" | "),
     steps: steps.map((s) => ({
       at: new Date().toISOString(),
       role: s.role,
       deployment: s.deployment,
-      task: plan.steps.find((p) => p.role === s.role)?.task ?? "",
+      task: s.task,
       output: s.output,
       usage: s.usage,
     })),

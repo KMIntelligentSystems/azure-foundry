@@ -19,7 +19,7 @@ Mechanics only: for each thing in `http_proxy`, what the Azure SDK equivalent is
 | `msg.tool_calls[]` | `resp.output.filter(o => o.type === "function_call")` | §3 |
 | `{role:"tool", tool_call_id, content}` | `{type:"function_call_output", call_id, output}` | §3 |
 | `REFRESH_SYSTEM_PROMPT` const | `project.agents.createVersion()` | Optional. Makes prompt+tools+model a versioned server object. §5 |
-| `.pi/agents/*.md` frontmatter | one agent version per role | `model`/`tools`/body → `model`/`tools`/`instructions`. §5 |
+| source app `.pi/agents/*.md` frontmatter | target app `src/hosted-agent/agents/*.md` runtime catalogue | The role pattern is ported; the pi namespace is not. `model`/`tools`/body → deployment/tool grants/instructions. §5 |
 | `dispatch()` in `broker.ts` | **unchanged** — stays in your process | Foundry never executes your tools. §6 |
 | `spawn("py", [run.py])` | **unchanged** | §6 |
 | `data/refresh.db` (SQLite) | **unchanged** | §6 |
@@ -127,8 +127,10 @@ await openai.responses.create(
 );
 ```
 
-The `.pi/agents/*.md` roster maps onto this one-to-one: frontmatter `model`/`tools` and the
-Markdown body → `model`/`tools`/`instructions`. Note each role would need its own
+The source app's `.pi/agents/*.md` roster maps into the target application's
+`src/hosted-agent/agents/*.md` catalogue: frontmatter `model`/`tools` and the
+Markdown body → deployment/tool grants/instructions. The target paths are
+application-owned and are not interpreted by pi or Foundry itself. Note each role would need its own
 deployment if you keep the per-role model pins (the statistician is on Kimi K3, which is
 not an Azure model — that role needs a substitute or stays on OpenRouter).
 

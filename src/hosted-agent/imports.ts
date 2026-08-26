@@ -1,5 +1,5 @@
 /**
- * imports.ts — role catalogue. Loads roles/*.md at startup into compiled
+ * imports.ts — role catalogue. Loads agents/*.md at startup into compiled
  * Role objects. Markdown is the authoring format only; after this module
  * runs, nothing downstream knows Markdown exists.
  */
@@ -15,7 +15,12 @@ export interface Role {
   instructions: string;
 }
 
-const ROLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "roles");
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const ROLES_DIR = [
+  process.env["AGENTS_ROOT"] ?? "",
+  path.resolve(MODULE_DIR, "agents"),
+  path.resolve(process.cwd(), "src", "hosted-agent", "agents"),
+].filter(Boolean).find((p) => fs.existsSync(p) && fs.statSync(p).isDirectory()) ?? path.resolve(MODULE_DIR, "agents");
 
 function parseRoleFile(filename: string): Role {
   const raw = fs.readFileSync(path.join(ROLES_DIR, filename), "utf8");

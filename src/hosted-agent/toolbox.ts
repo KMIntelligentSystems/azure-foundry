@@ -29,6 +29,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { callLlm, type ToolSpec } from "./foundry.js";
 import type { Role } from "./imports.js";
+import { listSkills, readSkill } from "./skills.js";
 
 // ── Budget ────────────────────────────────────────────────────────────────
 
@@ -261,8 +262,103 @@ const PY_MAX_CHARS = 20_000;
 const PY_STDOUT_CAP = 30_000;
 const PY_TIMEOUT_MS = 60_000;
 
-function runPython(code: string, ws: string): ToolResult {
+interface PanelStageRequest {
+  subject?: string | null;
+  series: string[];
+  path: string;
+}
+
+interface StagedPanel {
+  path: string;
+  subject: string | null;
+  series: string[];
+  seriesCount: number;
+  observations: number;
+  panelHash: string | null;
+  ranges: Array<{ seriesId: string; observations: number; range: [string, string] | null }>;
+}
+
+async function stageIndicatorPanel(
+  request: PanelStageRequest,
+  ws: string,
+  userId: string,
+): Promise<{ ok: true; staged: StagedPanel } | { ok: false; error: ToolResult }> {
+  const rel = String(request.path ?? "");
+  const series = Array.isArray(request.series) ? request.series.map(String) : [];
+  if (!rel || series.length === 0) {
+    return { ok: false, error: err("invalid_args", "stage_indicator_panel requires path and at least one series") };
+  }
+  const fullPath = resolveInWorkspace(ws, rel);
+  if (!fullPath) return { ok: false, error: err("path_escape", "staged panel path resolves outside the workspace") };
+
+  try {
+    const res = await fetch(`${artifactServiceUrl()}/refresh-panel`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": userId,
+        "X-User-Role": "admin",
+      },
+      body: JSON.stringify({ subject: request.subject ?? null, series }),
+    });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      return { ok: false, error: err("panel_failed", `artifact-service refresh-panel: HTTP ${res.status} ${text.slice(0, 200)}`) };
+    }
+    const body = JSON.parse(text) as {
+      subjectId?: string | null;
+      series?: string[];
+      rows?: Array<{ seriesId: string; observations: Array<{ date: string; value: number; is_preliminary: number }> }>;
+      panelHash?: string;
+    };
+    const rows = body.rows ?? [];
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    const tmp = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify({
+      subjectId: body.subjectId ?? request.subject ?? null,
+      series: body.series ?? series,
+      rows,
+      panelHash: body.panelHash ?? null,
+    }));
+    fs.renameSync(tmp, fullPath);
+
+    const ranges = rows.map((row) => ({
+      seriesId: row.seriesId,
+      observations: row.observations.length,
+      range: row.observations.length
+        ? [row.observations[0].date, row.observations[row.observations.length - 1].date] as [string, string]
+        : null,
+    }));
+    return {
+      ok: true,
+      staged: {
+        path: rel.replace(/\\/g, "/"),
+        subject: body.subjectId ?? request.subject ?? null,
+        series: body.series ?? series,
+        seriesCount: rows.length,
+        observations: ranges.reduce((n, row) => n + row.observations, 0),
+        panelHash: body.panelHash ?? null,
+        ranges,
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: err("network_error", e instanceof Error ? e.message : String(e)) };
+  }
+}
+
+async function runPython(
+  code: string,
+  ws: string,
+  ctx?: { userId?: string },
+  stageRequest?: PanelStageRequest | null,
+): Promise<ToolResult> {
   if (code.length > PY_MAX_CHARS) return err("invalid_args", `code over ${PY_MAX_CHARS} chars`);
+  let stagedInput: StagedPanel | undefined;
+  if (stageRequest) {
+    const stage = await stageIndicatorPanel(stageRequest, ws, ctx?.userId ?? "unknown");
+    if (!stage.ok) return stage.error;
+    stagedInput = stage.staged;
+  }
   const scrubbed: Record<string, string> = {};
   for (const k of ["PATH", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "TMP", "TEMP"]) {
     const v = process.env[k];
@@ -283,7 +379,11 @@ function runPython(code: string, ws: string): ToolResult {
       encoding: "utf8",
       windowsHide: true,
     });
-    return ok({ stdout: out.slice(0, PY_STDOUT_CAP), truncated: out.length > PY_STDOUT_CAP });
+    return ok({
+      ...(stagedInput ? { stagedInput } : {}),
+      stdout: out.slice(0, PY_STDOUT_CAP),
+      truncated: out.length > PY_STDOUT_CAP,
+    });
   } catch (e: any) {
     if (e?.killed || e?.signal === "SIGTERM") return err("budget_exceeded", "python run exceeded 60s");
     const stderr = String(e?.stderr ?? "").slice(0, 4_000);
@@ -422,6 +522,34 @@ interface ToolDef {
 }
 
 const CATALOG: Record<string, ToolDef> = {
+  list_skills: {
+    spec: {
+      type: "function",
+      name: "list_skills",
+      description: "List the hosted orchestrator's behavioral statistical method skills. Read the matching SKILL.md before computing; do not improvise a missing method.",
+      strict: true,
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+    run: () => ok({ skills: listSkills() }),
+  },
+  read_skill: {
+    spec: {
+      type: "function",
+      name: "read_skill",
+      description: "Read one complete hosted-agent skills/<name>/SKILL.md behavioral method document.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", description: "Skill folder/name, e.g. adl-monthly-nowcast" } },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+    run: (a) => {
+      const skill = readSkill(String(a["name"] ?? ""));
+      return skill ? ok(skill) : err("not_found", `skill not found: ${String(a["name"] ?? "")}`);
+    },
+  },
   read_file: {
     spec: {
       type: "function",
@@ -471,18 +599,38 @@ const CATALOG: Record<string, ToolDef> = {
       type: "function",
       name: "execute_python",
       description:
-        "Run Python 3 code in the conversation workspace (cwd). numpy/pandas/statsmodels/sklearn available. " +
-        "No network, scrubbed environment, 60s limit. Results come back via stdout — print() your outputs; " +
-        "save durable artifacts to workspace-relative paths and name them in finish().",
+        "Run agent-authored Python 3 code in the conversation workspace (cwd). numpy/pandas/statsmodels/sklearn available. " +
+        "For indicator-panel work, use stage_indicator_panel in THIS call: the runtime fetches raw refresh-panel observations " +
+        "and writes them to the requested workspace path before Python starts. Raw observations are never returned to the LLM; " +
+        "Python must open the staged JSON and apply the selected SKILL.md itself. No network, scrubbed environment, 60s limit. " +
+        "Results come back via stdout; save durable outputs to workspace-relative paths.",
       strict: true,
       parameters: {
         type: "object",
-        properties: { code: { type: "string", description: `Python source, max ${PY_MAX_CHARS} chars` } },
-        required: ["code"],
+        properties: {
+          code: { type: "string", description: `Python source, max ${PY_MAX_CHARS} chars` },
+          stage_indicator_panel: {
+            type: ["object", "null"],
+            description: "Optional raw-panel staging performed by execute_python before the script starts.",
+            properties: {
+              subject: { type: ["string", "null"], description: "Provenance subject label." },
+              series: { type: "array", items: { type: "string" }, description: "Exact indicator_history series IDs required by the skill." },
+              path: { type: "string", description: "Workspace-relative JSON destination, e.g. inputs/indicator-panel.json." },
+            },
+            required: ["subject", "series", "path"],
+            additionalProperties: false,
+          },
+        },
+        required: ["code", "stage_indicator_panel"],
         additionalProperties: false,
       },
     },
-    run: (a, ws) => runPython(String(a["code"] ?? ""), ws),
+    run: (a, ws, ctx) => runPython(
+      String(a["code"] ?? ""),
+      ws,
+      ctx,
+      (a["stage_indicator_panel"] as PanelStageRequest | null | undefined) ?? null,
+    ),
   },
   list_artifacts: {
     spec: {

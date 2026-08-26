@@ -54,5 +54,5 @@ export function validatePlan(plan: Plan): PlanVerdict {
   // Partially-invalid plans proceed on surviving steps (errors reported, not fatal).
   // A plan is rejected only when NOTHING survives or structural limits broke.
   const ok = steps.length > 0 && plan.steps.length <= MAX_STEPS;
-  return { ok, errors, plan: { rationale: plan.rationale, steps } };
+  return { ok, errors, plan: { rationale: plan.rationale, continuePlanning: plan.continuePlanning === true, steps } };
 }

@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { ThinkingPanel } from "./components/ThinkingPanel";
 import { ConversationPanel } from "./components/ConversationPanel";
 import { SimpleCatalogTree } from "./components/SimpleCatalogTree";
+import { runSynchronousTurn, type AgentWireEvent, type OrchestratorResult } from "./lib/agent-bridge";
+import { acquireGatewayToken, currentUser, signIn, signOut } from "./lib/auth";
 import "./App.css";
 
 const ARTIFACT_SERVICE = "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
@@ -62,13 +64,6 @@ function ArtifactViewer({ artifact, userId }: { artifact: CatalogArtifact; userI
   return <p style={{ color: "#8b949e" }}>Loading artifact…</p>;
 }
 
-interface Artifact {
-  path: string;
-  kind: string;
-  bytes: number;
-  valid?: boolean;
-}
-
 interface CatalogArtifact {
   id: string;
   user_id: string;
@@ -79,16 +74,6 @@ interface CatalogArtifact {
   url: string;
   created_at: string;
   tags: string | null;
-}
-
-interface OrchestratorResult {
-  ok: boolean;
-  conversationId: string;
-  plan?: { rationale: string; steps: Array<{ role: string; task: string; deployment: string }> };
-  steps?: Array<{ role: string; deployment: string; output: string; usage: { input: number; output: number } }>;
-  artifacts?: Artifact[];
-  response: string;
-  totals: { input: number; output: number };
 }
 
 interface ThinkingEntry {
@@ -120,16 +105,13 @@ function FoundryApp() {
   const [result, setResult] = useState<OrchestratorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  // Auth state. `userId` is the CONFIRMED identity (set only on login);
-  // the login form edits drafts so typing the first character doesn't flip
-  // the `if (!userId)` gate and unmount the form mid-entry.
-  // User IDs are compared case-sensitively by the artifact service
-  // (`Admin` ≠ `admin` → empty catalog), so normalize to lowercase at the
-  // identity boundary — both the sessionStorage restore and login.
-  const [userId, setUserId] = useState((sessionStorage.getItem("foundry_user") ?? "").trim().toLowerCase());
-  const [userRole, setUserRole] = useState<"admin" | "user">((sessionStorage.getItem("foundry_role") as "admin" | "user") ?? "user");
-  const [loginId, setLoginId] = useState("");
-  const [loginRole, setLoginRole] = useState<"admin" | "user">("user");
+  // UI identity state. In production the ACA gateway is authoritative: it
+  // verifies the Entra access token and derives the user id from its claims.
+  // `ALLOW_INSECURE_USER_ID=true` permits this manual form only for local dev.
+  // Artifact-service IDs are normalized to lowercase at the UI boundary.
+  const [userId, setUserId] = useState("");
+  const [userRole] = useState<"admin" | "user">("admin");
+  const [authReady, setAuthReady] = useState(false);
   const [selectedArtifact, setSelectedArtifact] = useState<CatalogArtifact | null>(null);
   // Bumped after every completed orchestrator turn so the catalog tree
   // re-fetches — a prompt like "fetch the artifacts" then visibly updates
@@ -145,10 +127,15 @@ function FoundryApp() {
   const [conversationUnread, setConversationUnread] = useState(0);
 
   useEffect(() => {
-    if (!conversationId) {
-      setConversationId(`conv-${Date.now()}`);
-    }
+    if (!conversationId) setConversationId(`conv-${Date.now()}`);
   }, [conversationId]);
+
+  useEffect(() => {
+    currentUser()
+      .then((id) => id && setUserId(id))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setAuthReady(true));
+  }, []);
 
   const addThinking = (kind: ThinkingEntry["kind"], label: string, body?: string, isError = false) => {
     const entry: ThinkingEntry = {
@@ -175,6 +162,39 @@ function FoundryApp() {
     if (!conversationOpen) setConversationUnread((n) => n + 1);
   };
 
+  const handleWireEvent = (event: AgentWireEvent) => {
+    const round = event.round ? ` · round ${event.round}` : "";
+    switch (event.type) {
+      case "agent_start":
+        addThinking("agent_start", `Orchestrator started${round}`);
+        break;
+      case "planning_start":
+        addThinking("reasoning", `Planning${round}`);
+        break;
+      case "plan":
+        addThinking("reasoning", `Plan${round}${event.continuePlanning ? " · will replan" : ""}`, event.rationale);
+        for (const step of event.steps ?? []) {
+          addThinking("reasoning", `${step.role} on ${step.deployment}`, step.task);
+        }
+        break;
+      case "step_start":
+        addThinking("tool_call", `${event.role ?? "step"} [${event.deployment ?? "worker"}]${round}`, event.task);
+        break;
+      case "step_end":
+        addThinking("tool_result", `${event.role ?? "step"}${round}`, event.output?.slice(0, 600));
+        break;
+      case "replanning":
+        addThinking("status", `Returning discovery results to planner${round}`);
+        break;
+      case "agent_end":
+        addThinking("agent_end", "Orchestrator completed");
+        break;
+      case "agent_error":
+        addThinking("agent_end", `Error: ${event.error ?? "unknown error"}`, undefined, true);
+        break;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || loading) return;
@@ -187,37 +207,21 @@ function FoundryApp() {
     addThinking("agent_start", `Invoking orchestrator (conversation: ${conversationId})…`);
 
     try {
-      const res = await fetch("/api/invoke", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: conversationId, promptText: prompt, user_id: userId }),
+      const data = await runSynchronousTurn({
+        conversationId,
+        promptText: prompt,
+        userId,
+        accessToken: await acquireGatewayToken(),
+        onEvent: handleWireEvent,
       });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      }
-
-      const data = (await res.json()) as OrchestratorResult;
       setResult(data);
       setCatalogRefreshKey((k) => k + 1);
 
-      // Populate thinking panel from the orchestrator's steps
-      if (data.plan) {
-        addThinking("reasoning", "Plan", data.plan.rationale);
-        data.plan.steps.forEach((s, i) => {
-          addThinking("reasoning", `Step ${i + 1}`, `${s.role} on ${s.deployment} — ${s.task}`);
-        });
-      }
-      if (data.steps) {
-        data.steps.forEach((s) => {
-          addThinking("tool_call", `${s.role} [${s.deployment}]`, undefined, false);
-          addThinking("tool_result", "Result", s.output.slice(0, 300) + (s.output.length > 300 ? "…" : ""));
-        });
-      }
+      // Detailed planning/tool progress arrived live over the ACA WebSocket.
       if (data.artifacts && data.artifacts.length > 0) {
         addThinking("status", "Artifacts", data.artifacts.map((a) => a.path).join(", "));
       }
-      addThinking("agent_end", `Done. Tokens: ${data.totals.input} in, ${data.totals.output} out`);
+      addThinking("status", `Tokens: ${data.totals.input} in, ${data.totals.output} out`);
 
       addConversation("assistant", data.response);
     } catch (err) {
@@ -241,21 +245,19 @@ function FoundryApp() {
     setConversationUnread(0);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!loginId.trim()) return;
-    const normalizedId = loginId.trim().toLowerCase();
-    sessionStorage.setItem("foundry_user", normalizedId);
-    sessionStorage.setItem("foundry_role", loginRole);
-    setUserId(normalizedId);
-    setUserRole(loginRole);
+  const handleLogin = async () => {
+    setError(null);
+    try {
+      const identity = await signIn();
+      setUserId(identity.userId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
-  const handleLogout = () => {
-    sessionStorage.removeItem("foundry_user");
-    sessionStorage.removeItem("foundry_role");
+  const handleLogout = async () => {
+    await signOut().catch(() => undefined);
     setUserId("");
-    setUserRole("user");
     setSelectedArtifact(null);
   };
 
@@ -263,50 +265,20 @@ function FoundryApp() {
     setSelectedArtifact(artifact);
   };
 
+  if (!authReady) {
+    return <div className="app-shell" style={{ display: "grid", placeItems: "center" }}>Loading authentication…</div>;
+  }
+
   if (!userId) {
     return (
       <div className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
         <div style={{ padding: "2rem", background: "#161b22", borderRadius: "8px", maxWidth: "400px" }}>
           <h2 style={{ color: "#58a6ff", marginBottom: "1rem" }}>Login</h2>
-          <form onSubmit={handleLogin}>
-            <div style={{ marginBottom: "1rem" }}>
-              <label style={{ display: "block", marginBottom: "0.5rem", color: "#8b949e" }}>User ID</label>
-              <input
-                type="text"
-                value={loginId}
-                onChange={(e) => setLoginId(e.target.value)}
-                placeholder="kim"
-                style={{
-                  width: "100%",
-                  padding: "0.5rem",
-                  background: "#0d1117",
-                  border: "1px solid #30363d",
-                  borderRadius: "4px",
-                  color: "#c9d1d9",
-                }}
-              />
-            </div>
-            <div style={{ marginBottom: "1rem" }}>
-              <label style={{ display: "block", marginBottom: "0.5rem", color: "#8b949e" }}>Role</label>
-              <select
-                value={loginRole}
-                onChange={(e) => setLoginRole(e.target.value as "admin" | "user")}
-                style={{
-                  width: "100%",
-                  padding: "0.5rem",
-                  background: "#0d1117",
-                  border: "1px solid #30363d",
-                  borderRadius: "4px",
-                  color: "#c9d1d9",
-                }}
-              >
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
-              </select>
-            </div>
+          <p style={{ color: "#8b949e", marginBottom: "1rem" }}>Use your Microsoft Entra account. The ACA gateway verifies the access token.</p>
+          {error && <p style={{ color: "#f78166" }}>{error}</p>}
             <button
-              type="submit"
-              disabled={!loginId.trim()}
+              type="button"
+              onClick={handleLogin}
               style={{
                 width: "100%",
                 padding: "0.75rem",
@@ -317,9 +289,8 @@ function FoundryApp() {
                 cursor: "pointer",
               }}
             >
-              Login
+              Sign in with Microsoft
             </button>
-          </form>
         </div>
       </div>
     );

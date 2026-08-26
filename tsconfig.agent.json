@@ -6,5 +6,5 @@
   // (@azure/functions, react, vite) are not in the root package.json.
   // Root `npm run typecheck` still covers them via tsconfig.json.
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "dist", "src/api", "src/react-app"]
+  "exclude": ["node_modules", "dist", "src/api", "src/react-app", "scripts"]
 }
