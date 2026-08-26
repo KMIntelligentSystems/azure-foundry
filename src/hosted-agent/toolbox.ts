@@ -586,6 +586,63 @@ const CATALOG: Record<string, ToolDef> = {
       return ok(report);
     },
   },
+  read_indicator_panel: {
+    spec: {
+      type: "function",
+      name: "read_indicator_panel",
+      description:
+        "Read the deterministic indicator panel from refresh.db indicator_history — " +
+        "the same data the http_proxy statistician reads from data/refresh.db — " +
+        "through the artifact-service proxy (admin-gated, HMAC to the daemon). " +
+        "Returns a shaped summary per series (seriesId, observations, range, hash) — " +
+        "never the full raw panel. Call with the series the skill needs (e.g. the 13-series ADL panel). " +
+        "Always call BEFORE execute_python when the task is over the indicator panel; " +
+        "never invent file names like refresh.db — it is not a workspace file.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          subject: { type: ["string", "null"], description: "Optional subject label (provenance only)." },
+          series: { type: "array", items: { type: "string" }, description: "indicator_history series_ids to export (e.g. m3_total_shipments_nsa, fred_ipman)." },
+        },
+        required: ["subject", "series"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, _ws, ctx) => {
+      const res = await fetch(`${artifactServiceUrl()}/refresh-panel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": ctx?.userId ?? "unknown",
+          "X-User-Role": "admin",
+        },
+        body: JSON.stringify({ subject: a["subject"] ?? null, series: a["series"] ?? [] }),
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        return err("panel_failed", `artifact-service refresh-panel: HTTP ${res.status} ${text.slice(0, 200)}`);
+      }
+      const body = JSON.parse(text) as {
+        series?: string[];
+        rows?: Array<{ seriesId: string; observations: Array<{ date: string; value: number; is_preliminary: number }> }>;
+        panelHash?: string;
+      };
+      // Shaped summary — the LLM sees the panel contract (which series, how
+      // much, what hash to cite), not thousands of raw rows.
+      const summary = (body.rows ?? []).map((r) => ({
+        seriesId: r.seriesId,
+        observations: r.observations.length,
+        range: r.observations.length ? [r.observations[0].date, r.observations[r.observations.length - 1].date] : null,
+      }));
+      return ok({
+        subject: a["subject"] ?? null,
+        series: body.series ?? [],
+        panelHash: body.panelHash ?? null,
+        summary,
+      });
+    },
+  },
   render_validate: {
     spec: {
       type: "function",
