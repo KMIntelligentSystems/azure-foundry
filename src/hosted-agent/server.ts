@@ -85,8 +85,11 @@ const server = http.createServer(async (req, res) => {
         typeof body?.["conversation_id"] === "string" ? (body["conversation_id"] as string) : undefined,
         typeof body?.["user_id"] === "string" ? (body["user_id"] as string) : undefined,
       );
+      // The banner carries the platform-injected version so callers can
+      // verify which agent version answered (FOUNDRY_AGENT_VERSION is set by
+      // the hosted-agent runtime; "dev" locally).
       res.writeHead(result.ok ? 200 : 422, { "Content-Type": "application/json" }).end(JSON.stringify({
-        agent: "orchestrator (chunk 1-2)",
+        agent: `orchestrator v${process.env["FOUNDRY_AGENT_VERSION"] ?? "dev"} (planner→steps→finish)`,
         ...result,
       }));
     } catch (e) {

@@ -1,5 +1,5 @@
 /** Chunk-4 direct: run the statistician role on a real stats task (planner bypassed). */
-import { runRole } from "../src/hosted-agent/broker.js";
+import { runRole } from "../src/hosted-agent/toolbox.js";
 import { getRole } from "../src/hosted-agent/imports.js";
 
 const cid = `smoke4b-${Date.now()}`;

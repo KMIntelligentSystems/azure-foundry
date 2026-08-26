@@ -1,5 +1,5 @@
 /**
- * refresh-sync smoke: broker's sync_indicator_history tool → stub artifact
+ * refresh-sync smoke: the toolbox's sync_indicator_history tool → stub artifact
  * service. Proves:
  *   1. dispatch forwards {dryRun} and the admin role header, returns the report.
  *   2. A role whose catalog lacks the tool is rejected at the airlock gate.
@@ -7,7 +7,7 @@
  *   4. getRole("operator") registers the new role (planner can route to it).
  */
 import http from "node:http";
-import { dispatch } from "../src/hosted-agent/broker.js";
+import { dispatch } from "../src/hosted-agent/toolbox.js";
 import { getRole } from "../src/hosted-agent/imports.js";
 import fs from "node:fs";
 import os from "node:os";

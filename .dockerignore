@@ -1,4 +1,12 @@
-node_modules
-dist
-.env
 .git
+.env
+.debug
+node_modules
+**/node_modules
+**/dist
+*.zip
+design
+scripts
+src/api
+src/react-app
+.github

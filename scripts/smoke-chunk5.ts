@@ -1,5 +1,5 @@
 /** Chunk-5 smoke: coder produces a D3 chart and validates it in Chromium. */
-import { runRole } from "../src/hosted-agent/broker.js";
+import { runRole } from "../src/hosted-agent/toolbox.js";
 import { getRole } from "../src/hosted-agent/imports.js";
 
 const cid = `smoke5-${Date.now()}`;

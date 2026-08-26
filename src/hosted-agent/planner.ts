@@ -59,6 +59,11 @@ RULES:
 - Output exactly one call to emit_plan. No prose, no other tools.
 - 1-5 steps. Each step: role (from the list), task (self-contained instruction),
   deployment (a WORKER deployment; never a planner one).
+- SELF-CONTAINED means VERBATIM: the worker sees ONLY the task text. Every URL
+  (INCLUDING its full query string — SAS signatures live there), artifact id,
+  file path, or exact instruction the step needs must be copied INTO the task
+  text. A task that says "fetch the provided URL" without the URL is a failed
+  plan.
 - Do not invent roles. If the prompt needs no roles, emit a plan with a single
   step whose role best answers directly.
 

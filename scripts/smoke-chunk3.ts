@@ -2,7 +2,7 @@
 import { orchestrate } from "../src/hosted-agent/orchestrator.js";
 const cid = `smoke3-${Date.now()}`;
 const r = await orchestrate(
-  "Write a file notes/hello.txt containing the line 'broker works', then read it back and confirm its contents.",
+  "Write a file notes/hello.txt containing the line 'toolbox works', then read it back and confirm its contents.",
   cid,
 );
 console.log(JSON.stringify({ ok: r.ok, conversationId: r.conversationId, plan: r.plan?.rationale,

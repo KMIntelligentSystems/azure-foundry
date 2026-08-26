@@ -1,0 +1,10 @@
+{
+  // Docker build of the hosted-agent container only: the image runs
+  // dist/hosted-agent/server.js and needs neither the SWA API function
+  // (src/api) nor the React app (src/react-app). Those are excluded here
+  // (and from the Docker context via .dockerignore) because their deps
+  // (@azure/functions, react, vite) are not in the root package.json.
+  // Root `npm run typecheck` still covers them via tsconfig.json.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/api", "src/react-app"]
+}

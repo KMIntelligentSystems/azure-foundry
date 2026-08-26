@@ -11,7 +11,22 @@ pending-tree text. No deference to pi/azd; code-first, /invocations surface.
 - Core LLM interaction: stateless Responses calls; the CONTAINER owns all context
   assembly (AGENTS.md/MEMORY.md distilled per call — the model sees nothing else).
 - Orchestrator routing is deliberately non-deterministic; determinism lives in the
-  sub-agent tool catalogs, budgets, and validators (LLM proposes, broker disposes).
+  sub-agent tool catalogs, budgets, and validators (LLM proposes, runtime disposes).
+
+> **Correction (2026-08-26):** the original draft of this doc said "dispatch()
+> gates every tool call into the broker; roles never touch FS/network/db except
+> through it (airlock property, in-process)" and named the module `broker.ts`.
+> That misapplied the flow-2 oracle/airlock trust split to this flow-1
+> interactive container. In the source app, flow 1 (React → host → orchestrator
+> agent) has an OPEN tool set (fetch_page, web_search, query_artifacts,
+> execute_python, playwright) with NO broker; the airlock lives only in flow 2
+> (the source oracle = Rust daemon `daemon-airlock`, the target oracle =
+> http_proxy's `src/refresh`). The module is renamed **`toolbox.ts`**: per-role
+> tool lists remain as least-privilege scoping + cost discipline, but the
+> catalog is an orchestrator toolbox that grows with ordinary capabilities
+> (fetch_url, workspace files, catalog read/save, python, render_validate)
+> without airlock justification. The SWA must not depend on the airlock; the
+> refresh airlock stays where it is — in the daemon.
 - **Planner/executor model selection (preferred over static role pins):**
   call 1 runs on the planner deployment (e.g. gpt-5.6-sol) and emits a structured
   plan — role, task, target deployment per step; subsequent steps run on the
@@ -27,7 +42,7 @@ callOrchestrator(state, plan)     → delegate(role, task, ctx) | finish(text)
 callRole(role, task, upstream)    → tool_call | final_artifacts
 ```
 Every call = `{ model, instructions, input, tools, store:false }`. Allowed
-models come ONLY from the broker's deployment allowlist.
+models come ONLY from the runtime's deployment allowlist.
 
 ### 2. Deterministic modules (TypeScript, all in-container)
 ```
@@ -38,9 +53,9 @@ src/hosted-agent/
                    #   instructions, toolSchemas[]} compiled at startup
   planner.ts       # callPlanner + tool schema for emit_plan
   validate_plan.ts # THE GATE (below)
-  broker.ts        # dispatch(toolCall) → execute in-container (closed catalogs)
+  toolbox.ts       # dispatch(toolCall) → execute in-container (per-role tool lists)
   executor.ts      # the delegate loop: validate → callRole over Responses →
-                   #   broker its tools → collect outputs → return to orchestrator
+                   #   route its tools through dispatch() → collect outputs → return to orchestrator
   orchestrator.ts  # outer loop: planner → validate_plan → executor → finish
   respond.ts       # response formatter (pending tree)
 validator & budgetinvariants:
@@ -51,8 +66,9 @@ validator & budgetinvariants:
     plus plan-level ceilings (maxSteps, totalCost) — same numbers discipline
     as airlock config.toml [budget]
   - validate_plan(plan, allowlist, roles, ceilings) → {ok, errors[], plan' clamped}
-  - dispatch() gates every tool call into the broker; roles never touch
-    FS/network/db except through it (airlock property, in-process)
+  - dispatch() scopes each role to the tools its .md grants (least-privilege
+    hygiene + budget enforcement) — NOT a trust boundary; this is the
+    orchestrator's toolbox, open to ordinary capabilities as needed
 ```
 
 ### 3. Tool catalogs per role (closed, as today)
@@ -60,7 +76,7 @@ validator & budgetinvariants:
 |---|---|---|
 | statistician | read, execute_python, write | python3 + pinned numpy/pandas/statsmodels/sklearn in image |
 | coder | read, write, playwright | chromium binaries baked in; validation inside dispatch |
-| research | web_search, fetch_page, read | closed egress; hosts allowlist per broker |
+| research | web_search, fetch_page, read | http(s)-only egress with loopback/private-host and IMDS refusal (same guards as fetch_url) |
 | narrator/stylist | read, write | |
 
 ### 4. Context assembly per call (what the model actually sees)
