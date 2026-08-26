@@ -1,5 +1,16 @@
 {
   "version": "2.0",
+  // Long-running orchestrator turns: the ADL prompt's statistician loop
+  // (planner + read_indicator_panel + execute_python) takes ~45s+ end-to-end.
+  // Azure Functions' default 30s response window 500s on the SWA path, so the
+  // function timeout must exceed it. 8 minutes is the headroom for the chart
+  // pipeline vs Azure's 10-min Free-SKU Functions cap.
+  // Long-running orchestrator turns: the ADL prompt's statistician loop
+  // (planner + read_indicator_panel + execute_python) takes ~45s+ end-to-end.
+  // Azure Functions' default 30s response window 500s on the SWA path, so the
+  // function timeout must exceed it. 8 minutes is the headroom for the chart
+  // pipeline vs Azure's 10-min Free-SKU Functions cap.
+  "functionTimeout": "00:08:00",
   "logging": {
     "applicationInsights": {
       "samplingSettings": {
