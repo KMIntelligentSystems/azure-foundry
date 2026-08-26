@@ -203,3 +203,20 @@ verified 2/2 on the SAS-blob fetch prompt. Hardenings from the deploy:
 - Windows az CLI note: `az acr build` may crash printing the log tail
   (cp1252 UnicodeEncodeError) while the remote build succeeds — check
   `az acr repository show-tags`, don't re-run.
+
+## Chunk 11 — read_indicator_panel: the azure parity loop closes (2026-08-26, WORKS)
+
+The ADL nowcast prompt assumed the http_proxy ambient-file idiom
+"statistician reads data/refresh.db". Azure's closed toolbox has no SQLite
+read — "upload refresh.db" was the worker's only imagined source. Fixed:
+
+| Layer | Trust |
+|---|---|
+| artifact-service `/refresh-panel` (daemon repo, admin-gated) | read-only open of the SHARED Azure-Files volume (`REFRESH_DB_PATH=/data/refresh.db`). SELECT → deterministic ordering + `sha256` panelHash. The refresh-daemon owns writes; the artifact-service is the only read surface. |
+| azure-foundry `read_indicator_panel` verb | forwards subject+series to artifact-service; returns SHAPED summary (series, ranges, obs counts, hash) — never raw rows |
+| roles/statistician + roles/reader | grant the verb; protocol says call it BEFORE execute_python, never say "upload refresh.db" |
+| planner | explicit rule: indicator-panel + statistics → route to statistician |
+
+Verified through the SWA on version 9: 13-series ADL panel summary, panels
+cited by hash slice (`1780814428…`), csv artifact written. prompt executed
+without upload asks.
