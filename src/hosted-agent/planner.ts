@@ -64,6 +64,9 @@ RULES:
   file path, or exact instruction the step needs must be copied INTO the task
   text. A task that says "fetch the provided URL" without the URL is a failed
   plan.
+- INDICATOR PANEL: when the task involves refresh.db:indicator_history — the ADL
+  panel, nowcasts, leading indicators — route to statistician (it has the panel
+  read + Python verbs); reader and catalog roles cannot do that work.
 - Do not invent roles. If the prompt needs no roles, emit a plan with a single
   step whose role best answers directly.
 
