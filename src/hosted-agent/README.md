@@ -178,3 +178,28 @@ redeploy is needed.
 Versions 1–3 registered; provisioning reached `ImageError` (registry auth);
 AcrPull assigned to the project MI afterwards; a re-register is the untested
 next step. All of it optional — this directory is for reading.
+
+## Chunk 10 — end-to-end deploy hardened (2026-08-26, WORKS)
+
+Deployed `foundry-agent-orchestrator:1.1.1` as agent version 7; SWA path
+verified 2/2 on the SAS-blob fetch prompt. Hardenings from the deploy:
+
+- `.dockerignore`: `**/node_modules`, `**/dist`, `src/api`, `src/react-app`,
+  `.git`, `.env`, `design`, `scripts` — the upload was stalling for 10+ min
+  because it packed every nested node_modules (hundreds of MB).
+- `tsconfig.agent.json`: extends root, excludes `src/api` + `src/react-app`
+  (`@azure/functions`/`react`/`vite` aren't in root package.json);
+  `Dockerfile.agent` runs `npx tsc -p tsconfig.agent.json`.
+- `register.ts` defaults now match live (`AGENT_NAME=orchestrator`,
+  image `foundry-agent-orchestrator:latest`); `AGENT_CPU`/`AGENT_MEMORY`
+  env-overrideable, defaults 1cpu/2Gi (the 0.5cpu/1Gi sample tier → ImageError
+  "too large for CPU tier" on our ~1GB image).
+- planner: verbatim-data rule (URLs incl. full SAS query strings, artifact
+  ids, paths copied INTO the task text) — the worker sees task text only, and
+  "fetch the provided URL" without the URL is a failed plan.
+- server banner: `orchestrator v${FOUNDRY_AGENT_VERSION}` so callers can
+  verify which version answered (the stale "chunk 1-2" banner burned an hour
+  of debugging).
+- Windows az CLI note: `az acr build` may crash printing the log tail
+  (cp1252 UnicodeEncodeError) while the remote build succeeds — check
+  `az acr repository show-tags`, don't re-run.
