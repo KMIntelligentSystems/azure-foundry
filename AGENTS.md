@@ -11,4 +11,5 @@ This project was built with the microsoft-foundry skill. Before working on or an
 - The interactive browser turn is synchronous over the ACA WebSocket gateway (`/ws/agent`). Do not replace it with a job/polling workflow or route long turns through an SWA managed Function.
 - Orchestration is iterative: discovery plans set `continuePlanning=true`; their outputs return to the planner before downstream roles are selected.
 - Flow-1 interactive tools are a toolbox, not the flow-2 refresh airlock.
+- Foundational leading-indicator access, staged JSON parsing, cutoff filtering, and common transforms are defined in `src/hosted-agent/skills/leading-indicator-panel/SKILL.md`; modeling skills build on that contract.
 - Any machinery change must update this file, `src/hosted-agent/README.md`, the relevant `src/hosted-agent/skills/` document, and architecture documentation in the same change.

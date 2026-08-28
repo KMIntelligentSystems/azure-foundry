@@ -21,6 +21,10 @@ check("panel staging is not a separate statistician tool", statistician?.toolNam
 
 const skills = listSkills();
 check("skill catalogue loads", skills.length > 0, `${skills.length} skills`);
+check("leading-indicator skill is indexed", skills.some((skill) => skill.name === "leading-indicator-panel"));
+const panelSkill = readSkill("leading-indicator-panel")?.content ?? "";
+check("leading-indicator skill fixes staged schema", panelSkill.includes('payload["rows"]') && panelSkill.includes('row["seriesId"]'));
+check("leading-indicator skill defines YoY log growth", panelSkill.includes('np.log(series["value"]) - np.log(series["value"].shift(12))'));
 check("ADL skill is indexed", skills.some((skill) => skill.name === "adl-monthly-nowcast"));
 check("ADL skill is readable", readSkill("adl-monthly-nowcast")?.content.includes("28 features total") === true);
 

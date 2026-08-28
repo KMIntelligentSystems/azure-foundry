@@ -222,7 +222,11 @@ Architecture smoke: `npm run test:architecture`. ACA source and deployment contr
 
 The old summary-only `read_indicator_panel` verb remains for reader/diagnostic
 compatibility, but it is no longer granted to the statistician. Statistical
-panel work must enter through the Python staging argument.
+panel work must enter through the Python staging argument. The foundational
+`skills/leading-indicator-panel/SKILL.md` now fixes the exact staged JSON shape,
+canonical 13-series dictionary, cutoff/release distinction, common level and
+YoY-log transformations, and the no-escalation contract for simple tests.
+Modeling skills such as `adl-monthly-nowcast` reference that foundation.
 
 ## Chunk 11 — read_indicator_panel: the azure parity loop closes (2026-08-26, WORKS)
 

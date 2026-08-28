@@ -5,6 +5,15 @@ description: Nowcast the current quarter/month of an M3 (or similar) monthly tar
 
 # ADL Monthly Nowcast — M3 Total Manufacturing Shipments (NSA, YoY log growth)
 
+## Prerequisite
+
+Read `leading-indicator-panel/SKILL.md` first for the canonical series
+identities, staged JSON schema, Python parsing pattern, cutoff discipline, and
+common transformations. This skill adds ADL-specific feature construction,
+estimation, walk-forward validation, prediction intervals, and contribution
+decomposition. If the request is only availability, coverage, recent values,
+or one transformation, use the foundational skill and do not run this model.
+
 Nowcast the **not-yet-published** month of a monthly target series using a
 panel of leading indicators whose publication lags differ. The canonical
 application: M3 Total Manufacturing Shipments (NSA), target = YoY log
