@@ -220,6 +220,11 @@ Architecture smoke: `npm run test:architecture`. ACA source and deployment contr
 `src/aca-gateway/server.ts`, `Dockerfile.gateway`, and
 `design/aca-synchronous-orchestrator.md`.
 
+Temporary budget policy: statistician steps receive a `$0.15` cost ceiling in
+`orchestrator.ts`; all other roles retain the toolbox's `$0.05` default. This
+is deliberate short-term headroom until validated task-relative budget profiles
+replace the role override.
+
 The old summary-only `read_indicator_panel` verb remains for reader/diagnostic
 compatibility, but it is no longer granted to the statistician. Statistical
 panel work must enter through the Python staging argument. The foundational

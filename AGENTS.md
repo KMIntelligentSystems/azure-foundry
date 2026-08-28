@@ -12,4 +12,5 @@ This project was built with the microsoft-foundry skill. Before working on or an
 - Orchestration is iterative: discovery plans set `continuePlanning=true`; their outputs return to the planner before downstream roles are selected.
 - Flow-1 interactive tools are a toolbox, not the flow-2 refresh airlock.
 - Foundational leading-indicator access, staged JSON parsing, cutoff filtering, and common transforms are defined in `src/hosted-agent/skills/leading-indicator-panel/SKILL.md`; modeling skills build on that contract.
+- The statistician currently has a temporary per-step cost ceiling of `$0.15` in `orchestrator.ts`; other roles retain the `$0.05` default. Replace this override with validated task-relative budget profiles in the planned budget-policy milestone.
 - Any machinery change must update this file, `src/hosted-agent/README.md`, the relevant `src/hosted-agent/skills/` document, and architecture documentation in the same change.

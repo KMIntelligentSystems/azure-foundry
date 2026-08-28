@@ -61,7 +61,12 @@ async function executeStep(
     ? "(no upstream results)"
     : upstream.map((u) => `--- round ${u.round}: ${u.role} ---\n${u.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`).join("\n");
   const actualDeployment = DEPLOYMENT_ALIAS[step.deployment] ?? step.deployment;
-  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, undefined, { userId });
+  // Temporary role override while named task-relative budget profiles are
+  // designed: statistical tool loops need enough headroom to read a skill,
+  // stage data, execute Python, and finish. Other roles retain the $0.05
+  // default ceiling.
+  const budget = step.role === "statistician" ? { costCeilingDollars: 0.15 } : undefined;
+  const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, budget, { userId });
   return { role: step.role, deployment: step.deployment, task: step.task, output: res.output, usage: res.usage, round };
 }
 
