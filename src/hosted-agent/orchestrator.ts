@@ -65,7 +65,7 @@ async function executeStep(
   // designed: statistical tool loops need enough headroom to read a skill,
   // stage data, execute Python, and finish. Other roles retain the $0.05
   // default ceiling.
-  const budget = step.role === "statistician" ? { costCeilingDollars: 0.15 } : undefined;
+  const budget = step.role === "statistician" ? { costCeilingDollars: 0.25 } : undefined;//was 0.15
   const res = await runRole(role, actualDeployment, step.task, upstreamText, conversationId, budget, { userId });
   return { role: step.role, deployment: step.deployment, task: step.task, output: res.output, usage: res.usage, round };
 }
