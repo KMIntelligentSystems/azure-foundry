@@ -261,7 +261,9 @@ async function readArtifactContent(args: Record<string, unknown>, userId: string
 // ── execute_python: the one spawn the runtime permits ──────────────────────
 //
 // Runs model-authored Python in a locked-down child (mirrors lockdown.rs):
-// scrubbed env, cwd = workspace, CPU/memory rlimits on Linux, 60s kill.
+// scrubbed env, cwd = workspace, CPU rlimit on Linux, 60s kill. Memory is
+// bounded by the ACA container cgroup; RLIMIT_AS cannot be used because the
+// scientific Python stack reserves more virtual address space than it commits.
 // stdout is the contract — results, prints, tracebacks all ride it back.
 
 const PYTHON_BIN = process.env["PYTHON_BIN"] ?? (process.platform === "win32" ? "py" : "python3");
@@ -375,7 +377,7 @@ async function runPython(
   }
   const ulimits =
     process.platform === "linux"
-      ? "import resource\nresource.setrlimit(resource.RLIMIT_AS,(536870912,536870912))\nresource.setrlimit(resource.RLIMIT_CPU,(55,55))\n"
+      ? "import resource\nresource.setrlimit(resource.RLIMIT_CPU,(55,55))\n"
       : "";
   const scriptPath = path.join(ws, `.exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.py`);
   fs.writeFileSync(scriptPath, ulimits + code);
