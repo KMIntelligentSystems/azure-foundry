@@ -30,29 +30,17 @@ import { execFileSync } from "node:child_process";
 import { callLlm, type ToolSpec } from "./foundry.js";
 import type { Role } from "./imports.js";
 import { listSkills, readSkill } from "./skills.js";
-
-// ── Budget ────────────────────────────────────────────────────────────────
-
-export interface StepBudget {
-  maxToolCalls: number;
-  wallClockSecs: number;
-  /** Azure price $/1K input|output per deployment; unknown deployment → refused. */
-  prices: Record<string, { input: number; output: number }>;
-  costCeilingDollars: number;
-}
-
-export const DEFAULT_BUDGET: Omit<StepBudget, "prices"> = {
-  maxToolCalls: 12,
-  wallClockSecs: 120,
-  costCeilingDollars: 0.05,
-};
-
-// gpt-4.1 family Azure list prices ($/1K tokens)
-export const PRICES: Record<string, { input: number; output: number }> = {
-  "gpt-4.1-mini": { input: 0.0004, output: 0.0016 },
-  "gpt-4.1": { input: 0.002, output: 0.008 },
-  "gpt-4.1-strong": { input: 0.002, output: 0.008 }, // alias → gpt-4.1
-};
+import {
+  BUDGET_PROFILES,
+  TurnBudgetLedger,
+  actualDeployment,
+  estimateInputTokens,
+  priceFor,
+  reservationCost,
+  usageCost,
+  type BudgetProfile,
+  type BudgetProfileName,
+} from "./budgets.js";
 
 // ── Tool result wire ──────────────────────────────────────────────────────
 
@@ -85,6 +73,35 @@ function resolveInWorkspace(ws: string, rel: string): string | null {
   return p.startsWith(ws + path.sep) || p === ws ? p : null;
 }
 
+/** Return a structured tool error instead of letting readFile/render operations
+ * throw when a model supplies the workspace root ("."/empty) or a directory. */
+function workspaceFileError(fullPath: string): ToolResult | null {
+  try {
+    if (!fs.statSync(fullPath).isFile()) {
+      return err("not_file", "path is a directory; use list_files to inspect the workspace");
+    }
+    return null;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error
+      ? String((error as NodeJS.ErrnoException).code)
+      : "";
+    if (code === "ENOENT") return err("not_found", "no such file");
+    return err("file_access_error", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** A new file may not exist yet, but an existing output target must be a file. */
+function workspaceWriteTargetError(fullPath: string): ToolResult | null {
+  try {
+    if (fs.existsSync(fullPath) && !fs.statSync(fullPath).isFile()) {
+      return err("not_file", "output path is a directory; provide a file path");
+    }
+    return null;
+  } catch (error) {
+    return err("file_access_error", error instanceof Error ? error.message : String(error));
+  }
+}
+
 // ── save_artifact: upload workspace file to artifact service (chunk 7) ────
 //
 // The user's "save this to catalog X" prompt becomes a tool call here. The
@@ -114,7 +131,8 @@ async function saveArtifactToCatalog(
 
   const fullPath = resolveInWorkspace(ws, path);
   if (!fullPath) return err("path_escape", "path resolves outside the workspace");
-  if (!fs.existsSync(fullPath)) return err("not_found", `workspace file not found: ${path}`);
+  const fileError = workspaceFileError(fullPath);
+  if (fileError) return fileError;
 
   const content = fs.readFileSync(fullPath);
   const mimeType = path.endsWith(".html") ? "text/html" : path.endsWith(".json") ? "application/json" : path.endsWith(".md") ? "text/markdown" : "application/octet-stream";
@@ -290,6 +308,8 @@ async function stageIndicatorPanel(
   }
   const fullPath = resolveInWorkspace(ws, rel);
   if (!fullPath) return { ok: false, error: err("path_escape", "staged panel path resolves outside the workspace") };
+  const targetError = workspaceWriteTargetError(fullPath);
+  if (targetError) return { ok: false, error: targetError };
 
   try {
     const res = await fetch(`${artifactServiceUrl()}/refresh-panel`, {
@@ -489,7 +509,8 @@ export interface RenderReport {
 }
 
 async function renderValidate(htmlPath: string): Promise<ToolResult> {
-  if (!fs.existsSync(htmlPath)) return err("not_found", "no such file");
+  const fileError = workspaceFileError(htmlPath);
+  if (fileError) return fileError;
   const consoleErrors: string[] = [];
   try {
     const browser = await getBrowser();
@@ -566,7 +587,8 @@ const CATALOG: Record<string, ToolDef> = {
     run: (a, ws) => {
       const p = resolveInWorkspace(ws, String(a["path"] ?? ""));
       if (!p) return err("path_escape", "path resolves outside the workspace");
-      if (!fs.existsSync(p)) return err("not_found", "no such file");
+      const fileError = workspaceFileError(p);
+      if (fileError) return fileError;
       return ok({ path: a["path"], content: fs.readFileSync(p, "utf8").slice(0, 50_000) });
     },
   },
@@ -589,6 +611,8 @@ const CATALOG: Record<string, ToolDef> = {
     run: (a, ws) => {
       const p = resolveInWorkspace(ws, String(a["path"] ?? ""));
       if (!p) return err("path_escape", "path resolves outside the workspace");
+      const targetError = workspaceWriteTargetError(p);
+      if (targetError) return targetError;
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, String(a["content"] ?? ""));
       return ok({ path: a["path"], bytes: Buffer.byteLength(String(a["content"] ?? "")) });
@@ -883,7 +907,11 @@ export async function dispatch(
 export interface RoleRunResult {
   output: string;
   usage: { input: number; output: number };
-  iterations: number;
+  modelCalls: number;
+  toolExecutions: number;
+  estimatedCostDollars: number;
+  profile: BudgetProfileName;
+  stepCeilingDollars: number;
   terminatedBy: "finish" | "text" | "budget";
 }
 
@@ -893,18 +921,21 @@ export async function runRole(
   task: string,
   upstreamText: string,
   conversationId: string,
-  budget?: Partial<StepBudget>,
+  profileName: BudgetProfileName,
+  ledger?: TurnBudgetLedger,
   ctx?: { userId?: string },
+  round = 1,
+  modelCaller: typeof callLlm = callLlm,
 ): Promise<RoleRunResult> {
-  const b: StepBudget = {
-    maxToolCalls: budget?.maxToolCalls ?? DEFAULT_BUDGET.maxToolCalls,
-    wallClockSecs: budget?.wallClockSecs ?? DEFAULT_BUDGET.wallClockSecs,
-    costCeilingDollars: budget?.costCeilingDollars ?? DEFAULT_BUDGET.costCeilingDollars,
-    prices: PRICES,
-  };
-  const price = b.prices[deployment];
-  if (!price) {
-    return { output: `deployment '${deployment}' has no known price — refused`, usage: { input: 0, output: 0 }, iterations: 0, terminatedBy: "budget" };
+  const b: BudgetProfile = BUDGET_PROFILES[profileName];
+  const billedDeployment = actualDeployment(deployment);
+  if (!priceFor(billedDeployment)) {
+    return {
+      output: `deployment '${deployment}' has no configured budget price — refused`,
+      usage: { input: 0, output: 0 }, modelCalls: 0, toolExecutions: 0,
+      estimatedCostDollars: 0, profile: profileName,
+      stepCeilingDollars: b.costCeilingDollars, terminatedBy: "budget",
+    };
   }
 
   const ws = workspaceRoot(conversationId);
@@ -915,7 +946,9 @@ export async function runRole(
   ];
   const deadline = Date.now() + b.wallClockSecs * 1000;
   const usage = { input: 0, output: 0 };
-  const cost = () => (usage.input * price.input + usage.output * price.output) / 1000;
+  let modelCalls = 0;
+  let toolExecutions = 0;
+  const cost = () => usageCost(billedDeployment, usage);
 
   // The LLM never sees the budget numbers change its instructions — it only
   // learns about exhaustion when we terminate the loop.
@@ -926,19 +959,42 @@ export async function runRole(
   let terminatedBy: RoleRunResult["terminatedBy"] = "budget";
   let output = "";
 
-  for (let iter = 0; iter < b.maxToolCalls; iter++) {
+  for (let iter = 0; iter < b.maxModelCalls; iter++) {
     if (Date.now() > deadline) { output = `step aborted: wall-clock ${b.wallClockSecs}s exhausted`; break; }
-    if (cost() >= b.costCeilingDollars) { output = `step aborted: cost ceiling $${b.costCeilingDollars} reached ($${cost().toFixed(4)})`; break; }
+    // Reaching the tool limit still permits one subsequent model call to emit
+    // finish/text; only additional non-finish tool calls are refused below.
+    const estimatedInput = estimateInputTokens({ instructions: role.instructions, input, tools });
+    const reserved = reservationCost(billedDeployment, estimatedInput, b.maxOutputTokensPerCall);
+    if (cost() + reserved > b.costCeilingDollars) {
+      output = `step aborted: budget admission refused; $${(cost() + reserved).toFixed(4)} projected > $${b.costCeilingDollars.toFixed(2)} ${profileName} ceiling`;
+      break;
+    }
+    if (ledger) {
+      const admission = ledger.canReserve(billedDeployment, estimatedInput, b.maxOutputTokensPerCall);
+      if (!admission.ok) { output = `step aborted: budget_exhausted: ${admission.reason}`; break; }
+    }
 
-    const res = await callLlm({
-      model: deployment,
+    const res = await modelCaller({
+      model: billedDeployment,
       instructions: role.instructions,
       input,
       tools: allowed.length > 0 ? tools : undefined,
-      maxOutputTokens: 4096,
+      maxOutputTokens: b.maxOutputTokensPerCall,
     });
+    modelCalls++;
     usage.input += res.usage.input;
     usage.output += res.usage.output;
+    ledger?.charge({
+      kind: "worker", deployment: billedDeployment, role: role.name,
+      round, profile: profileName, usage: res.usage,
+    });
+    // Actual usage is known only after the response. Do not execute any tool
+    // calls from an overshooting response or begin another model call.
+    if (cost() > b.costCeilingDollars || (ledger && ledger.costDollars > ledger.policy.costCeilingDollars)) {
+      output = `step aborted: budget exhausted after model response ($${cost().toFixed(4)} / $${b.costCeilingDollars.toFixed(2)} step; turn $${(ledger?.costDollars ?? cost()).toFixed(4)} / $${(ledger?.policy.costCeilingDollars ?? b.costCeilingDollars).toFixed(2)})`;
+      terminatedBy = "budget";
+      break;
+    }
 
     // Responses idiom: echo the model's raw output items back into input
     // BEFORE appending function_call_output (call_id correlation requires it).
@@ -956,6 +1012,12 @@ export async function runRole(
         terminatedBy = "finish";
         break;
       }
+      if (toolExecutions >= b.maxToolExecutions) {
+        output = `step aborted: ${b.maxToolExecutions} tool executions exhausted`;
+        terminatedBy = "budget";
+        break;
+      }
+      toolExecutions++;
       const tr = await dispatch(c.name, c.args, allowed, ws, ctx);
       input.push({
         type: "function_call_output",
@@ -966,6 +1028,10 @@ export async function runRole(
     if (terminatedBy === "finish") break;
   }
 
-  if (!output) output = `step aborted: ${b.maxToolCalls} tool-call iterations exhausted`;
-  return { output, usage, iterations: 0, terminatedBy };
+  if (!output) output = `step aborted: ${b.maxModelCalls} model calls exhausted`;
+  return {
+    output, usage, modelCalls, toolExecutions,
+    estimatedCostDollars: cost(), profile: profileName,
+    stepCeilingDollars: b.costCeilingDollars, terminatedBy,
+  };
 }

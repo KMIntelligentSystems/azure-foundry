@@ -68,7 +68,10 @@ For any value-level operation, call `execute_python` with
 
 The runtime writes raw observations to the workspace before Python starts. Raw
 rows are not returned to the LLM. The runtime performs no transformation or
-statistical method; Python must open and process the staged file.
+statistical method; Python must open and process the staged file. Use
+`list_files` to inspect workspace contents and `read_file` only with a concrete
+regular-file path; directory paths such as `.` return a structured `not_file`
+error.
 
 ## 4. Exact staged JSON schema
 

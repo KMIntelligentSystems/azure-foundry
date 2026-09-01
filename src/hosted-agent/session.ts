@@ -27,7 +27,7 @@ export interface TurnRecord {
   prompt: string;
   planRationale?: string;
   steps: StepRecord[];
-  totals: { input: number; output: number };
+  totals: { input: number; output: number; estimatedCostDollars?: number };
   ok: boolean;
 }
 

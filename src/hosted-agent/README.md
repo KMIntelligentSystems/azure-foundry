@@ -77,7 +77,7 @@ planner gets state, steps get upstream).
 
 | Module | Role |
 |---|---|
-| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), `dispatch()` scoping gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
+| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), path-type guards that convert directory read/write/upload/render/staging targets to structured `not_file` errors, `dispatch()` scoping gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
 | `agents/reader.md` | first tools-bearing role |
 | orchestrator | executeStep → `runRole` (real tool loops, not single calls) |
 
@@ -220,10 +220,15 @@ Architecture smoke: `npm run test:architecture`. ACA source and deployment contr
 `src/aca-gateway/server.ts`, `Dockerfile.gateway`, and
 `design/aca-synchronous-orchestrator.md`.
 
-Temporary budget policy: statistician steps receive a `$0.15` cost ceiling in
-`orchestrator.ts`; all other roles retain the toolbox's `$0.05` default. This
-is deliberate short-term headroom until validated task-relative budget profiles
-replace the role override.
+Budget policy is centralized in `budgets.ts`. The planner classifies each step
+with a named profile but never supplies money or token values. `validate_plan.ts`
+enforces the role/profile matrix and clamps excessive profiles against a trusted
+maximum derived only from the original prompt. `plan()` and `runRole()` debit one
+turn ledger, so planner calls, worker calls, aliases, replanning rounds, model-call
+counts, and tool-execution counts are all represented. Admission reserves estimated
+input plus maximum output cost before a call; actual usage is charged afterward;
+unknown deployment prices fail closed. The browser displays these values as
+estimated application cost, not an Azure billing guarantee.
 
 The old summary-only `read_indicator_panel` verb remains for reader/diagnostic
 compatibility, but it is no longer granted to the statistician. Statistical

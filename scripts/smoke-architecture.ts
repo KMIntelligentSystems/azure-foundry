@@ -31,9 +31,10 @@ check("ADL skill is readable", readSkill("adl-monthly-nowcast")?.content.include
 const verdict = validatePlan({
   rationale: "Resolve prompt before downstream planning",
   continuePlanning: true,
-  steps: [{ role: "reader", task: "Read the named prompt artifact and return its complete contents.", deployment: "gpt-4.1-mini" }],
-});
+  steps: [{ role: "reader", task: "Read the named prompt artifact and return its complete contents.", deployment: "gpt-4.1-mini", budgetProfile: "discovery" }],
+}, "Resolve the named prompt artifact before running it.");
 check("validator preserves iterative continuation", verdict.ok && verdict.plan.continuePlanning);
+check("validator preserves compatible budget profile", verdict.plan.steps[0]?.budgetProfile === "discovery");
 
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "azure-foundry-stage-"));
 const python = await dispatch("execute_python", {

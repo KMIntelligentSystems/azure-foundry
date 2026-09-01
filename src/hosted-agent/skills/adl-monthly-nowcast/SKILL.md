@@ -100,6 +100,12 @@ backtest origin (see §6).
 
 ## 5. Models
 
+Budget classification is task-relative. A request explicitly limited to the
+naive floor plus one fixed ADL-OLS specification is `standard-analysis`; do not
+escalate it to `full-nowcast`. The complete comparison below (including LASSO,
+elastic net, and full walk-forward selection) is `full-nowcast`. Budget profiles
+are safety ceilings, never instructions to spend to the ceiling.
+
 1. **Naive floor:** `ĝ_t = g_{t−2}` (persistence of the last admissible
    YoY growth).
 2. **ADL-OLS-BIC:** forward stepwise selection over the 28 features
