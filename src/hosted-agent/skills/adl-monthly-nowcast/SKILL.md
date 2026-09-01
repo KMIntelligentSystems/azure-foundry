@@ -65,6 +65,75 @@ bound). YoY transforms burn 12 months of feature history, which is
 available pre-2006 for all series except CES hours — which is why CES
 hours enters in **levels**.
 
+### 2a. Required long-to-wide conversion
+
+The staged JSON is nested by series and the foundational skill's canonical
+parser produces a **long** DataFrame with columns `series_id`, `date`, `value`,
+and `is_preliminary`. Do not access a series ID as a DataFrame column until the
+long data has been validated and explicitly pivoted to wide form.
+
+```python
+required_series = [
+    "m3_total_shipments_nsa",
+    "m3_new_orders",
+    "m3_unfilled_orders",
+    "fred_ipman",
+    "fred_mcumfn",
+    "fred_tcu",
+    "bls_ces_mfg_employment",
+    "bls_ces_mfg_hours",
+    "bls_ppi_mfg",
+    "fred_cfnai",
+    "fred_empire_state_mfg",
+    "fred_philly_fed_mfg",
+    "fred_dallas_fed_mfg",
+]
+
+present = set(panel["series_id"].unique())
+missing = sorted(set(required_series) - present)
+if missing:
+    raise ValueError(f"required series absent from staged panel: {missing}")
+
+if panel.duplicated(["series_id", "date"]).any():
+    duplicates = (
+        panel.loc[panel.duplicated(["series_id", "date"], keep=False),
+                  ["series_id", "date"]]
+        .astype(str)
+        .to_dict("records")
+    )
+    raise ValueError(f"duplicate series-month observations: {duplicates[:20]}")
+
+wide = (
+    panel.pivot(index="date", columns="series_id", values="value")
+         .reindex(columns=required_series)
+         .sort_index()
+)
+wide.columns.name = None
+
+# Validate column identity before any log, lag, feature, or model operation.
+missing_columns = [series_id for series_id in required_series if series_id not in wide.columns]
+if missing_columns:
+    raise ValueError(f"required columns absent after pivot: {missing_columns}")
+if wide["m3_total_shipments_nsa"].dropna().empty:
+    raise ValueError("target series has no usable observations after pivot")
+```
+
+From this point onward, construct transformations and features from `wide`, not
+from the long `panel`. For example:
+
+```python
+wide["g_target"] = (
+    np.log(wide["m3_total_shipments_nsa"])
+    - np.log(wide["m3_total_shipments_nsa"].shift(12))
+)
+```
+
+Do not apply a positivity rule to level indices that legitimately cross zero
+(CFNAI and the regional surveys). Apply positivity checks only to series used
+inside logarithms. Different final observation months are expected because of
+the release calendar; align lags as specified below rather than treating those
+end-date differences as evidence that a series is absent.
+
 ## 3. Information cutoff and release admissibility
 
 For a nowcast of target month `t` with an information cutoff at end of

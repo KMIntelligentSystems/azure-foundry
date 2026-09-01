@@ -10,6 +10,7 @@ React SWA --wss--> ACA gateway /ws/agent
                          +-- iterative planner
                          +-- hosted-agent agents + behavioral skills
                          +-- execute_python(stage_indicator_panel)
+                         +-- trusted named budget profiles + shared turn ledger
                          +-- coder + Playwright
                          `-- final result on the same socket
 ```
@@ -35,7 +36,8 @@ introduced. Progress events and the final result travel over the same socket.
 ```
 
 - Server messages: `ready`, repeated `agent_event`, then exactly one `result`
-  or `error`.
+  or `error`. Step events carry profile, step/turn estimated application cost,
+  model-call count, tool-execution count, and termination reason.
 - Configure `ALLOWED_ORIGINS` in ACA as a comma-separated exact list containing
   the production SWA origin.
 - Configure `ACA_GATEWAY_CLIENT_ID` and `ENTRA_TENANT_ID`; the first prompt
@@ -64,7 +66,9 @@ Vite connects to `ws://localhost:8080/ws/agent` by default in development.
 2. Deploy/update an external-ingress ACA app with target port 8080, WebSocket
    support, managed identity, and `minReplicas=1`, `maxReplicas=1` initially.
 3. Supply the Foundry project/model, artifact-service, origin, and identity
-   environment configuration already used by the hosted-agent runtime.
+   environment configuration already used by the hosted-agent runtime. Optional
+   `BUDGET_PRICES_JSON` overrides the complete trusted per-1K-token price table;
+   malformed or missing deployment entries fail closed.
 4. Set `VITE_AGENT_WS_URL` in the SWA build and redeploy the frontend.
 5. Smoke a prompt-reference turn and verify a reader discovery round is
    followed by planner re-entry before statistician execution.

@@ -26,32 +26,26 @@ export interface AgentWireEvent {
   index?: number;
   rationale?: string;
   continuePlanning?: boolean;
-  steps?: Array<{ role: string; task: string; deployment: string; budgetProfile?: string }>;
+  steps?: Array<{ role: string; task: string; deployment: string }>;
   role?: string;
   deployment?: string;
   task?: string;
   output?: string;
   error?: string;
-  budgetProfile?: string;
   modelCalls?: number;
   toolExecutions?: number;
-  stepCostDollars?: number;
-  stepCeilingDollars?: number;
-  turnCostDollars?: number;
-  turnCeilingDollars?: number;
   terminatedBy?: string;
 }
 
 export interface OrchestratorResult {
   ok: boolean;
   conversationId: string;
-  plan?: { rationale: string; steps: Array<{ role: string; task: string; deployment: string; budgetProfile: string }> };
-  plans?: Array<{ rationale: string; continuePlanning: boolean; steps: Array<{ role: string; task: string; deployment: string; budgetProfile: string }> }>;
-  steps?: Array<{ role: string; deployment: string; output: string; usage: { input: number; output: number }; round?: number; budgetProfile: string; modelCalls: number; toolExecutions: number; estimatedCostDollars: number; stepCeilingDollars: number; terminatedBy: string }>;
+  plan?: { rationale: string; steps: Array<{ role: string; task: string; deployment: string }> };
+  plans?: Array<{ rationale: string; continuePlanning: boolean; steps: Array<{ role: string; task: string; deployment: string }> }>;
+  steps?: Array<{ role: string; deployment: string; output: string; usage: { input: number; output: number }; round?: number; modelCalls: number; toolExecutions: number; terminatedBy: string }>;
   artifacts?: Array<{ path: string; kind: string; bytes: number; valid?: boolean }>;
   response: string;
-  totals: { input: number; output: number; estimatedCostDollars: number };
-  budget: { turnClass: string; turnCeilingDollars: number; turnCostDollars: number; remainingDollars: number; plannerCalls: number; modelCalls: number };
+  totals: { input: number; output: number };
 }
 
 export const artifactEvents = new EventTarget();

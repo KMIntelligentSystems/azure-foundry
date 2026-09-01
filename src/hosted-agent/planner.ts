@@ -5,20 +5,16 @@
  */
 import { callLlm } from "./foundry.js";
 import { describeRolesForPlanner } from "./imports.js";
-import {
-  BUDGET_PROFILES,
-  ROLE_PROFILE_ALLOWLIST,
-  TurnBudgetLedger,
-  estimateInputTokens,
-  type BudgetProfileName,
-  type TokenUsage,
-} from "./budgets.js";
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
 
 export interface PlanStep {
   role: string;
   task: string;
   deployment: string;
-  budgetProfile: BudgetProfileName;
 }
 
 export interface Plan {
@@ -41,12 +37,8 @@ export const ALLOWLIST: DeploymentEntry[] = [
   // strong planner until a quota request lands.
   { name: "gpt-4.1", kind: "planner", costHint: "strongest deployed; planning only" },
   { name: "gpt-4.1-mini", kind: "worker", costHint: "cheap + fast; default for routine steps" },
-  { name: "gpt-4.1-strong", kind: "worker", costHint: "same gpt-4.1 weights, marked for statistics — deployment alias, not a separate model" },
 ];
 
-// The alias maps onto the same underlying deployment; the marker exists so the
-// validator can distinguish "planner seat" from "strong worker seat" without
-// two Azure deployments (which would double quota).
 export const PLANNER_DEPLOYMENT = "gpt-4.1";
 
 function plannerInstructions(): string {
@@ -62,22 +54,10 @@ ${describeRolesForPlanner()}
 AVAILABLE DEPLOYMENTS (choose one per step; cheaper is better when quality allows):
 ${zoo}
 
-BUDGET PROFILES (classify workload only; trusted runtime owns all limits):
-${Object.values(BUDGET_PROFILES).map((profile) => `- ${profile.name}`).join("\n")}
-
-ROLE/PROFILE COMPATIBILITY:
-${Object.entries(ROLE_PROFILE_ALLOWLIST).map(([role, profiles]) => `- ${role}: ${profiles.join(" | ")}`).join("\n")}
-
 RULES:
 - Output exactly one call to emit_plan. No prose, no other tools.
 - 1-5 steps. Each step: role (from the list), task (self-contained instruction),
-  deployment (a WORKER deployment; never a planner one), and budgetProfile
-  (one compatible named profile). Never emit dollar or token limits.
-- Classify narrowly: availability/coverage → metadata; prompt/URL/artifact
-  discovery → discovery; latest value/YoY/cutoff → simple-transform; regression,
-  diagnostics, a fixed OLS/ADL, or a small backtest → standard-analysis; the
-  complete four-model ADL workflow → full-nowcast; one chart → single-chart;
-  multiple charts → chart-batch.
+  deployment (a WORKER deployment; never a planner one).
 - Set continuePlanning=true whenever a step discovers information that is
   required to choose later work: resolving a prompt file/URL, inspecting an
   unknown artifact, or researching a source. In that case emit ONLY the
@@ -123,9 +103,8 @@ const EMIT_PLAN_TOOL = {
             role: { type: "string" },
             task: { type: "string" },
             deployment: { type: "string" },
-            budgetProfile: { type: "string", enum: Object.keys(BUDGET_PROFILES) },
           },
-          required: ["role", "task", "deployment", "budgetProfile"],
+          required: ["role", "task", "deployment"],
           additionalProperties: false,
         },
       },
@@ -138,15 +117,12 @@ const EMIT_PLAN_TOOL = {
 export interface PlanResult {
   plan: Plan;
   usage: TokenUsage;
-  estimatedCostDollars: number;
 }
 
-/** One planning round: prompt + prior/round context → raw plan + charged usage. */
+/** One planning round: prompt + prior context → raw plan + usage. */
 export async function plan(
   prompt: string,
   priorContext = "(no prior turns)",
-  ledger?: TurnBudgetLedger,
-  round = 1,
   modelCaller: typeof callLlm = callLlm,
 ): Promise<PlanResult> {
   const instructions = plannerInstructions();
@@ -156,27 +132,12 @@ export async function plan(
       content: `PRIOR CONVERSATION:\n${priorContext}\n\nCURRENT PROMPT:\n${prompt}`,
     },
   ];
-  const maxOutputTokens = 2_048;
-  if (ledger) {
-    const admission = ledger.canStartPlannerCall(
-      PLANNER_DEPLOYMENT,
-      estimateInputTokens({ instructions, input, tools: EMIT_PLAN_TOOL }),
-      maxOutputTokens,
-    );
-    if (!admission.ok) throw new Error(`budget_exhausted: ${admission.reason}`);
-  }
   const res = await modelCaller({
     model: PLANNER_DEPLOYMENT,
     instructions,
     input,
     tools: [EMIT_PLAN_TOOL],
-    maxOutputTokens,
-  });
-  const charge = ledger?.charge({
-    kind: "planner",
-    deployment: PLANNER_DEPLOYMENT,
-    round,
-    usage: res.usage,
+    maxOutputTokens: 2_048,
   });
   const call = res.functionCalls.find((c) => c.name === "emit_plan");
   if (!call) {
@@ -189,6 +150,5 @@ export async function plan(
       steps: (call.args["steps"] as PlanStep[] | undefined) ?? [],
     },
     usage: res.usage,
-    estimatedCostDollars: charge?.estimatedCostDollars ?? 0,
   };
 }

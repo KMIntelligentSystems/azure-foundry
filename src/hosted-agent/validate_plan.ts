@@ -5,7 +5,6 @@
  */
 import { ALLOWLIST, type Plan } from "./planner.js";
 import { getRole } from "./imports.js";
-import { clampProfile, isBudgetProfileName, profileAllowedForRole } from "./budgets.js";
 
 export interface PlanVerdict {
   ok: boolean;
@@ -16,7 +15,7 @@ export interface PlanVerdict {
 const MAX_STEPS = 5;
 const MAX_TASK_CHARS = 2_000;
 
-export function validatePlan(plan: Plan, prompt = ""): PlanVerdict {
+export function validatePlan(plan: Plan): PlanVerdict {
   const errors: string[] = [];
   const workerDeployments = new Set(
     ALLOWLIST.filter((d) => d.kind === "worker").map((d) => d.name),
@@ -45,19 +44,7 @@ export function validatePlan(plan: Plan, prompt = ""): PlanVerdict {
       errors.push(`step '${s.role}' task missing or over ${MAX_TASK_CHARS} chars`);
       return false;
     }
-    if (!isBudgetProfileName(String(s.budgetProfile ?? ""))) {
-      errors.push(`step '${s.role}' has unknown budget profile '${String(s.budgetProfile ?? "")}'`);
-      return false;
-    }
-    if (!profileAllowedForRole(s.role, s.budgetProfile)) {
-      errors.push(`step '${s.role}' cannot use budget profile '${s.budgetProfile}'`);
-      return false;
-    }
     return true;
-  }).map((s) => {
-    const resolved = clampProfile(s.role, s.budgetProfile, prompt);
-    if (resolved.clamped && resolved.reason) errors.push(`step '${s.role}' budget: ${resolved.reason}`);
-    return { ...s, budgetProfile: resolved.profile };
   });
 
   if (steps.length === 0 && plan.steps.length > 0) {

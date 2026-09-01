@@ -70,14 +70,14 @@ planner gets state, steps get upstream).
 > agent) has an OPEN tool set and NO broker; the airlock lives only in flow 2
 > (source oracle = Rust daemon `daemon-airlock` in ACA; target oracle =
 > http_proxy's `src/refresh`). The module is now **`toolbox.ts`**: per-role
-> tool lists + budgets remain as least-privilege scoping and cost discipline
-> (LLM proposes, runtime disposes), but the catalog is an orchestrator toolbox
+> tool lists remain as least-privilege scoping (LLM proposes, runtime disposes),
+> but the catalog is an orchestrator toolbox
 > that grows with ordinary capabilities without airlock justification — it
 > holds no signing keys or secrets. The SWA does not depend on the airlock.
 
 | Module | Role |
 |---|---|
-| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), path-type guards that convert directory read/write/upload/render/staging targets to structured `not_file` errors, `dispatch()` scoping gate, `runRole` tool loop with budgets (maxToolCalls, wallClock, $ cost ceiling via per-deployment prices). `execute_python` → chunk 4, `playwright` → chunk 5. |
+| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), path-type guards that convert directory read/write/upload/render/staging targets to structured `not_file` errors, `dispatch()` scoping gate, `runRole` tool loop bounded by fixed safety limits (max model calls, max tool executions, wall-clock). `execute_python` → chunk 4, `playwright` → chunk 5. |
 | `agents/reader.md` | first tools-bearing role |
 | orchestrator | executeStep → `runRole` (real tool loops, not single calls) |
 
@@ -220,23 +220,18 @@ Architecture smoke: `npm run test:architecture`. ACA source and deployment contr
 `src/aca-gateway/server.ts`, `Dockerfile.gateway`, and
 `design/aca-synchronous-orchestrator.md`.
 
-Budget policy is centralized in `budgets.ts`. The planner classifies each step
-with a named profile but never supplies money or token values. `validate_plan.ts`
-enforces the role/profile matrix and clamps excessive profiles against a trusted
-maximum derived only from the original prompt. `plan()` and `runRole()` debit one
-turn ledger, so planner calls, worker calls, aliases, replanning rounds, model-call
-counts, and tool-execution counts are all represented. Admission reserves estimated
-input plus maximum output cost before a call; actual usage is charged afterward;
-unknown deployment prices fail closed. The browser displays these values as
-estimated application cost, not an Azure billing guarantee.
-
 The old summary-only `read_indicator_panel` verb remains for reader/diagnostic
 compatibility, but it is no longer granted to the statistician. Statistical
 panel work must enter through the Python staging argument. The foundational
 `skills/leading-indicator-panel/SKILL.md` now fixes the exact staged JSON shape,
 canonical 13-series dictionary, cutoff/release distinction, common level and
 YoY-log transformations, and the no-escalation contract for simple tests.
-Modeling skills such as `adl-monthly-nowcast` reference that foundation.
+Modeling skills such as `adl-monthly-nowcast` reference that foundation. The
+ADL method additionally fixes the long-to-wide boundary: validate all 13
+`series_id` values and duplicate series-month keys, pivot to date-indexed series
+columns, then construct transformations/features from the wide frame. This
+prevents treating a valid nested panel as though series IDs were already DataFrame
+columns.
 
 ## Chunk 11 — read_indicator_panel: the azure parity loop closes (2026-08-26, WORKS)
 

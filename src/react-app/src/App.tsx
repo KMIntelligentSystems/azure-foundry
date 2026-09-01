@@ -174,21 +174,21 @@ function FoundryApp() {
       case "plan":
         addThinking("reasoning", `Plan${round}${event.continuePlanning ? " · will replan" : ""}`, event.rationale);
         for (const step of event.steps ?? []) {
-          addThinking("reasoning", `${step.role} on ${step.deployment}${step.budgetProfile ? ` · ${step.budgetProfile}` : ""}`, step.task);
+          addThinking("reasoning", `${step.role} on ${step.deployment}`, step.task);
         }
         break;
       case "step_start":
         addThinking(
           "tool_call",
-          `${event.role ?? "step"} [${event.deployment ?? "worker"}]${round}${event.budgetProfile ? ` · ${event.budgetProfile}` : ""}`,
-          `${event.task ?? ""}${event.stepCeilingDollars !== undefined ? `\nStep ceiling: $${event.stepCeilingDollars.toFixed(2)} · Turn: $${(event.turnCostDollars ?? 0).toFixed(4)} / $${(event.turnCeilingDollars ?? 0).toFixed(2)}` : ""}`,
+          `${event.role ?? "step"} [${event.deployment ?? "worker"}]${round}`,
+          event.task ?? "",
         );
         break;
       case "step_end":
         addThinking(
           "tool_result",
-          `${event.role ?? "step"}${round}${event.budgetProfile ? ` · ${event.budgetProfile}` : ""}`,
-          `${event.output?.slice(0, 600) ?? ""}${event.stepCostDollars !== undefined ? `\n\nStep: $${event.stepCostDollars.toFixed(4)} / $${(event.stepCeilingDollars ?? 0).toFixed(2)} · Turn: $${(event.turnCostDollars ?? 0).toFixed(4)} / $${(event.turnCeilingDollars ?? 0).toFixed(2)} · ${event.modelCalls ?? 0} model calls · ${event.toolExecutions ?? 0} tools · ${event.terminatedBy ?? "done"}` : ""}`,
+          `${event.role ?? "step"}${round}`,
+          `${event.output?.slice(0, 600) ?? ""}\n\n${event.modelCalls ?? 0} model calls · ${event.toolExecutions ?? 0} tools · ${event.terminatedBy ?? "done"}`,
         );
         break;
       case "replanning":
@@ -229,7 +229,7 @@ function FoundryApp() {
       if (data.artifacts && data.artifacts.length > 0) {
         addThinking("status", "Artifacts", data.artifacts.map((a) => a.path).join(", "));
       }
-      addThinking("status", `Tokens: ${data.totals.input} in, ${data.totals.output} out · estimated application cost $${data.totals.estimatedCostDollars.toFixed(4)} / $${data.budget.turnCeilingDollars.toFixed(2)}`);
+      addThinking("status", `Tokens: ${data.totals.input} in, ${data.totals.output} out`);
 
       addConversation("assistant", data.response);
     } catch (err) {

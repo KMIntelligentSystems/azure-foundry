@@ -59,7 +59,9 @@ src/hosted-agent/
                    #   instructions, toolSchemas[]} compiled at startup
   planner.ts       # callPlanner + tool schema for emit_plan
   validate_plan.ts # THE GATE (below)
-  toolbox.ts       # dispatch(toolCall) → execute in-container (per-role tool lists)
+  toolbox.ts       # dispatch(toolCall) → execute in-container (per-role tool lists;
+                   # file reads/uploads/renders and write/staging targets return
+                   # structured not_file errors for directories, never EISDIR)
   executor.ts      # the delegate loop: validate → callRole over Responses →
                    #   route its tools through dispatch() → collect outputs → return to orchestrator
   orchestrator.ts  # iterative outer loop: planner → validate → execute → replan|finish
@@ -68,9 +70,17 @@ validator & budgetinvariants:
   - DeploymentAllowlist: [{ name, roles:[*]|roles-limited, kind: planner|worker }]
       * planner-marked deployments cannot run worker steps
       * allowlist enforced in validate_plan BEFORE any worker token is spent
-  - StepBudget: per-step { maxToolCalls, wallClockSecs, tokenCeiling, costCeiling }
-    plus plan-level ceilings (maxSteps, totalCost) — same numbers discipline
-    as airlock config.toml [budget]
+  - Named profiles in budgets.ts resolve to per-step { maxModelCalls,
+    maxToolExecutions, wallClockSecs, maxOutputTokensPerCall, costCeilingDollars }
+    plus one shared turn ceiling. The planner emits only the profile name;
+    trusted code owns money and clamps against original-prompt intent.
+  - Every planner and worker response is charged to the turn ledger; admission
+    reserves estimated input + maximum output before each call. Unknown prices
+    fail closed and deployment aliases charge as their actual model.
+  - Indicator-panel modeling keeps its data-shape boundary in the behavioral
+    skill: staged nested JSON → validated long frame → explicit date × series
+    pivot → transformations and features. Series IDs are never assumed to be
+    DataFrame columns before that pivot.
   - validate_plan(plan, allowlist, roles, ceilings) → {ok, errors[], plan' clamped}
   - dispatch() scopes each role to the tools its .md grants (least-privilege
     hygiene + budget enforcement) — NOT a trust boundary; this is the

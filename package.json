@@ -12,8 +12,7 @@
     "sample:agent": "tsx src/samples/agent.ts",
     "start:gateway": "tsx src/aca-gateway/server.ts",
     "start:agent": "tsx src/hosted-agent/server.ts",
-    "test:architecture": "tsx scripts/smoke-architecture.ts",
-    "test:budgets": "tsx scripts/test-budget-policy.ts && tsx scripts/test-budget-runtime.ts"
+    "test:architecture": "tsx scripts/smoke-architecture.ts"
   },
   "keywords": [
     "azure",

@@ -15,8 +15,8 @@
  *
  * The N2 design doc mistakenly copied flow-2's airlock property ("roles never
  * touch FS/network except through the broker") into this flow-1 container.
- * The correction: per-role tool lists and budgets remain — as least-privilege
- * scoping and cost discipline (LLM proposes, runtime disposes) — but this
+ * The correction: per-role tool lists remain as least-privilege scoping
+ * (LLM proposes, runtime disposes) — but this
  * catalog is the orchestrator's TOOLBOX: it grows with ordinary capabilities
  * (fetch_url, workspace files, catalog read/save, python, render_validate)
  * without airlock justification, and it holds no signing keys or secrets.
@@ -30,17 +30,6 @@ import { execFileSync } from "node:child_process";
 import { callLlm, type ToolSpec } from "./foundry.js";
 import type { Role } from "./imports.js";
 import { listSkills, readSkill } from "./skills.js";
-import {
-  BUDGET_PROFILES,
-  TurnBudgetLedger,
-  actualDeployment,
-  estimateInputTokens,
-  priceFor,
-  reservationCost,
-  usageCost,
-  type BudgetProfile,
-  type BudgetProfileName,
-} from "./budgets.js";
 
 // ── Tool result wire ──────────────────────────────────────────────────────
 
@@ -405,7 +394,7 @@ async function runPython(
       truncated: out.length > PY_STDOUT_CAP,
     });
   } catch (e: any) {
-    if (e?.killed || e?.signal === "SIGTERM") return err("budget_exceeded", "python run exceeded 60s");
+    if (e?.killed || e?.signal === "SIGTERM") return err("timeout_exceeded", "python run exceeded 60s");
     const stderr = String(e?.stderr ?? "").slice(0, 4_000);
     const stdout = String(e?.stdout ?? "").slice(0, 4_000);
     return err("python_error", `${e?.message ?? "python failed"}\n${stderr}${stdout ? `\nstdout before error: ${stdout}` : ""}`);
@@ -904,15 +893,19 @@ export async function dispatch(
 
 // ── runRole — one step's tool loop ────────────────────────────────────────
 
+// Hard safety bounds for the tool loop — fixed runtime guards, not budgeting:
+// the model gets enough room for a substantive step, then the loop terminates.
+const MAX_MODEL_CALLS = 30;
+const MAX_TOOL_EXECUTIONS = 30;
+const WALL_CLOCK_SECS = 900;
+const MAX_OUTPUT_TOKENS_PER_CALL = 8192;
+
 export interface RoleRunResult {
   output: string;
   usage: { input: number; output: number };
   modelCalls: number;
   toolExecutions: number;
-  estimatedCostDollars: number;
-  profile: BudgetProfileName;
-  stepCeilingDollars: number;
-  terminatedBy: "finish" | "text" | "budget";
+  terminatedBy: "finish" | "text" | "limit";
 }
 
 export async function runRole(
@@ -921,80 +914,40 @@ export async function runRole(
   task: string,
   upstreamText: string,
   conversationId: string,
-  profileName: BudgetProfileName,
-  ledger?: TurnBudgetLedger,
   ctx?: { userId?: string },
   round = 1,
   modelCaller: typeof callLlm = callLlm,
 ): Promise<RoleRunResult> {
-  const b: BudgetProfile = BUDGET_PROFILES[profileName];
-  const billedDeployment = actualDeployment(deployment);
-  if (!priceFor(billedDeployment)) {
-    return {
-      output: `deployment '${deployment}' has no configured budget price — refused`,
-      usage: { input: 0, output: 0 }, modelCalls: 0, toolExecutions: 0,
-      estimatedCostDollars: 0, profile: profileName,
-      stepCeilingDollars: b.costCeilingDollars, terminatedBy: "budget",
-    };
-  }
-
   const ws = workspaceRoot(conversationId);
   const allowed = [...role.toolNames];
   const tools: ToolSpec[] = [
     ...allowed.map((n) => CATALOG[n].spec),
     FINISH_TOOL,
   ];
-  const deadline = Date.now() + b.wallClockSecs * 1000;
+  const deadline = Date.now() + WALL_CLOCK_SECS * 1000;
   const usage = { input: 0, output: 0 };
   let modelCalls = 0;
   let toolExecutions = 0;
-  const cost = () => usageCost(billedDeployment, usage);
 
-  // The LLM never sees the budget numbers change its instructions — it only
-  // learns about exhaustion when we terminate the loop.
   const input: unknown[] = [
     { role: "user", content: `TASK:\n${task}\n\nUPSTREAM RESULTS:\n${upstreamText || "(none)"}\n\nWorkspace files persist across steps of this conversation. Call finish(output) when done.` },
   ];
 
-  let terminatedBy: RoleRunResult["terminatedBy"] = "budget";
+  let terminatedBy: RoleRunResult["terminatedBy"] = "limit";
   let output = "";
 
-  for (let iter = 0; iter < b.maxModelCalls; iter++) {
-    if (Date.now() > deadline) { output = `step aborted: wall-clock ${b.wallClockSecs}s exhausted`; break; }
-    // Reaching the tool limit still permits one subsequent model call to emit
-    // finish/text; only additional non-finish tool calls are refused below.
-    const estimatedInput = estimateInputTokens({ instructions: role.instructions, input, tools });
-    const reserved = reservationCost(billedDeployment, estimatedInput, b.maxOutputTokensPerCall);
-    if (cost() + reserved > b.costCeilingDollars) {
-      output = `step aborted: budget admission refused; $${(cost() + reserved).toFixed(4)} projected > $${b.costCeilingDollars.toFixed(2)} ${profileName} ceiling`;
-      break;
-    }
-    if (ledger) {
-      const admission = ledger.canReserve(billedDeployment, estimatedInput, b.maxOutputTokensPerCall);
-      if (!admission.ok) { output = `step aborted: budget_exhausted: ${admission.reason}`; break; }
-    }
-
+  for (let iter = 0; iter < MAX_MODEL_CALLS; iter++) {
+    if (Date.now() > deadline) { output = `step aborted: wall-clock ${WALL_CLOCK_SECS}s exhausted`; break; }
     const res = await modelCaller({
-      model: billedDeployment,
+      model: deployment,
       instructions: role.instructions,
       input,
       tools: allowed.length > 0 ? tools : undefined,
-      maxOutputTokens: b.maxOutputTokensPerCall,
+      maxOutputTokens: MAX_OUTPUT_TOKENS_PER_CALL,
     });
     modelCalls++;
     usage.input += res.usage.input;
     usage.output += res.usage.output;
-    ledger?.charge({
-      kind: "worker", deployment: billedDeployment, role: role.name,
-      round, profile: profileName, usage: res.usage,
-    });
-    // Actual usage is known only after the response. Do not execute any tool
-    // calls from an overshooting response or begin another model call.
-    if (cost() > b.costCeilingDollars || (ledger && ledger.costDollars > ledger.policy.costCeilingDollars)) {
-      output = `step aborted: budget exhausted after model response ($${cost().toFixed(4)} / $${b.costCeilingDollars.toFixed(2)} step; turn $${(ledger?.costDollars ?? cost()).toFixed(4)} / $${(ledger?.policy.costCeilingDollars ?? b.costCeilingDollars).toFixed(2)})`;
-      terminatedBy = "budget";
-      break;
-    }
 
     // Responses idiom: echo the model's raw output items back into input
     // BEFORE appending function_call_output (call_id correlation requires it).
@@ -1012,9 +965,9 @@ export async function runRole(
         terminatedBy = "finish";
         break;
       }
-      if (toolExecutions >= b.maxToolExecutions) {
-        output = `step aborted: ${b.maxToolExecutions} tool executions exhausted`;
-        terminatedBy = "budget";
+      if (toolExecutions >= MAX_TOOL_EXECUTIONS) {
+        output = `step aborted: ${MAX_TOOL_EXECUTIONS} tool executions exhausted`;
+        terminatedBy = "limit";
         break;
       }
       toolExecutions++;
@@ -1028,10 +981,6 @@ export async function runRole(
     if (terminatedBy === "finish") break;
   }
 
-  if (!output) output = `step aborted: ${b.maxModelCalls} model calls exhausted`;
-  return {
-    output, usage, modelCalls, toolExecutions,
-    estimatedCostDollars: cost(), profile: profileName,
-    stepCeilingDollars: b.costCeilingDollars, terminatedBy,
-  };
+  if (!output) output = `step aborted: ${MAX_MODEL_CALLS} model calls exhausted`;
+  return { output, usage, modelCalls, toolExecutions, terminatedBy };
 }
