@@ -85,6 +85,19 @@ function plannerRoundContext(session: SessionState, steps: StepResult[]): string
   return `${prior}\n\nCURRENT TURN EXECUTION RESULTS:\n${current}\n\nWorkspace files produced by these steps persist for the next round.`;
 }
 
+function planningPrompt(prompt: string, session: SessionState): string {
+  if (!/^\s*(continue|retry|resume|try again)\b/i.test(prompt)) return prompt;
+  // A failed retry may itself contain a planner-narrowed task. Recover the
+  // fullest prior specification, not merely the last step, so "continue"
+  // cannot silently drop models, validation, outputs, or chart feeds.
+  const previousTask = session.turns
+    .flatMap((turn) => turn.steps.map((step) => step.task))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0];
+  if (!previousTask) return prompt;
+  return `${prompt.trim()}\n\nRETRY/RESUME THE COMPLETE PREVIOUS TASK WITHOUT NARROWING ITS SCOPE:\n${previousTask}`;
+}
+
 export async function orchestrate(
   prompt: string,
   conversationId?: string,
@@ -97,13 +110,14 @@ export async function orchestrate(
   const plans: Plan[] = [];
   const steps: StepResult[] = [];
   const validationErrors: string[] = [];
+  const effectivePrompt = planningPrompt(prompt, session);
 
   await emit(eventSink, { type: "agent_start", conversationId: id, prompt });
 
   try {
     for (let round = 1; round <= MAX_PLANNING_ROUNDS; round++) {
       await emit(eventSink, { type: "planning_start", conversationId: id, round });
-      const planned = await plan(prompt, plannerRoundContext(session, steps));
+      const planned = await plan(effectivePrompt, plannerRoundContext(session, steps));
       totals.input += planned.usage.input;
       totals.output += planned.usage.output;
       const verdict = validatePlan(planned.plan);

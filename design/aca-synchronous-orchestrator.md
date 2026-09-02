@@ -10,7 +10,7 @@ React SWA --wss--> ACA gateway /ws/agent
                          +-- iterative planner
                          +-- hosted-agent agents + behavioral skills
                          +-- async execute_python(stage_indicator_panel)
-                         +-- fixed runtime safety limits
+                         +-- call-count guards + Python CPU/wall limits
                          +-- coder + Playwright
                          `-- final result on the same socket
 ```
@@ -39,6 +39,9 @@ introduced. Progress events and the final result travel over the same socket.
   `result` or `error`. Step events carry model-call count, tool-execution count,
   and termination reason. Ping + JSON heartbeat frames keep long turns live;
   CPU-heavy Python must use an asynchronous child process so Node can emit them.
+  Worker roles have no separate outer wall-clock deadline: model/tool-call
+  counts bound the loop, while execute_python owns its CPU/wall limits. A
+  `continue`/`retry` request restores the fullest prior task specification.
   The browser retries transient handshake failures up to three times, but only
   before `ready` and prompt submission; post-submit disconnects are never retried.
   Gateway logs record upgrade rejection, connection origin, and close code.

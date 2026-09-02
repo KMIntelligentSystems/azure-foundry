@@ -167,6 +167,46 @@ For predicting `g_t`:
 panel construction automatically simulates the release calendar at every
 backtest origin (see §6).
 
+### 4a. Prediction-row construction (do not require target month in the panel)
+
+The prediction row is *labeled* by target month `t`, but every predictor is
+read from an earlier admissible month. After hard truncation, `t` will normally
+not exist in the observed-data index. Never use `features.loc[t]` on a frame
+whose index was inherited only from observed/truncated rows, and never report
+that the cutoff is missing merely because `t` is absent.
+
+For the June 2026 nowcast:
+
+```python
+t = pd.Period("2026-06", freq="M")
+# transformed is indexed by monthly Period and already applies the series-
+# specific admissibility caps: M3 <= Apr; lag-1/surveys <= May.
+x_t = {
+    "g_target_lag2": transformed.at[t - 2, "g_target"],
+    "g_target_lag3": transformed.at[t - 3, "g_target"],
+    "g_target_lag4": transformed.at[t - 4, "g_target"],
+    # M3 orders: transformed values at t-2 and t-3
+    # lag-1 indicator blocks: transformed values at t-1 and t-2
+    # survey blocks: levels at t-1 and t-2
+    "covid_2020q2": int(t in {
+        pd.Period("2020-04", "M"),
+        pd.Period("2020-05", "M"),
+        pd.Period("2020-06", "M"),
+    }),
+}
+# Add the remaining named features explicitly, then preserve training columns.
+prediction = pd.DataFrame([x_t], index=pd.PeriodIndex([t], freq="M"))
+prediction = prediction.reindex(columns=X_train.columns)
+if prediction.isna().any(axis=None):
+    missing = prediction.columns[prediction.isna().iloc[0]].tolist()
+    raise ValueError(f"prediction row has unavailable lagged inputs: {missing}")
+```
+
+Before fitting, emit a coverage/admissibility diagnostic containing, for each
+series: raw last month, permitted last month, used last month, and required
+feature months for `t`. A true missing-data failure must name the exact series,
+month, and feature; a generic “May/cutoff not in index” is not sufficient.
+
 ## 5. Models
 
 Respect the model scope in the task. If the user requests only the naive floor

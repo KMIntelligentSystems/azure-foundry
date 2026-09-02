@@ -77,7 +77,7 @@ planner gets state, steps get upstream).
 
 | Module | Role |
 |---|---|
-| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), path-type guards that convert directory read/write/upload/render/staging targets to structured `not_file` errors, `dispatch()` scoping gate, `runRole` tool loop bounded by fixed safety limits (max model calls, max tool executions, wall-clock). `execute_python` → chunk 4, `playwright` → chunk 5. |
+| `toolbox.ts` (was `broker.ts`) | per-role tool lists (`read_file`/`write_file`/`list_files` in a per-conversation workspace, path-escape proof), path-type guards that convert directory read/write/upload/render/staging targets to structured `not_file` errors, `dispatch()` scoping gate, `runRole` tool loop bounded by model/tool-call counts; scientific Python owns CPU/wall limits. `execute_python` → chunk 4, `playwright` → chunk 5. |
 | `agents/reader.md` | first tools-bearing role |
 | orchestrator | executeStep → `runRole` (real tool loops, not single calls) |
 
@@ -213,7 +213,7 @@ The full interactive architecture now preserves the source agent/skill split:
 | `src/hosted-agent/agents` | application-owned role prompts and tool grants; copied into both runtime images |
 | `src/hosted-agent/skills` | application-owned behavioral method documents; the statistician calls `list_skills` + `read_skill` before authoring Python; not pi or Foundry-native resources |
 | `execute_python(stage_indicator_panel=...)` | fetches `/refresh-panel`, atomically stages raw rows in the conversation workspace, then starts agent-authored Python; tool output exposes only hash/count/range metadata + stdout |
-| iterative planner | plans carry `continuePlanning`; prompt/artifact discovery executes first and returns to the planner before substantive role selection |
+| iterative planner | plans carry `continuePlanning`; prompt/artifact discovery executes first and returns to the planner before substantive role selection; `continue`/`retry` reuses the fullest previous task instead of a narrowed retry |
 | ACA gateway | `/ws/agent` keeps one synchronous browser turn open and streams planning/step events plus the final result; it is not a polling job and does not use `invocations_ws` |
 
 Architecture smoke: `npm run test:architecture`. ACA source and deployment contract:

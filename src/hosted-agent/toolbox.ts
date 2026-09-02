@@ -961,11 +961,11 @@ export async function dispatch(
 
 // ── runRole — one step's tool loop ────────────────────────────────────────
 
-// Hard safety bounds for the tool loop — fixed runtime guards, not budgeting:
-// the model gets enough room for a substantive step, then the loop terminates.
+// Hard safety bounds for the tool loop — fixed call-count guards, not
+// budgeting. Long scientific work is bounded inside execute_python by its
+// CPU/wall limits; the role itself must not abort a valid multi-minute run.
 const MAX_MODEL_CALLS = 30;
 const MAX_TOOL_EXECUTIONS = 30;
-const WALL_CLOCK_SECS = 900;
 const MAX_OUTPUT_TOKENS_PER_CALL = 8192;
 
 export interface RoleRunResult {
@@ -1011,7 +1011,6 @@ export async function runRole(
     ...allowed.map((n) => CATALOG[n].spec),
     FINISH_TOOL,
   ];
-  const deadline = Date.now() + WALL_CLOCK_SECS * 1000;
   const usage = { input: 0, output: 0 };
   let modelCalls = 0;
   let toolExecutions = 0;
@@ -1024,7 +1023,6 @@ export async function runRole(
   let output = "";
 
   for (let iter = 0; iter < MAX_MODEL_CALLS; iter++) {
-    if (Date.now() > deadline) { output = `step aborted: wall-clock ${WALL_CLOCK_SECS}s exhausted`; break; }
     const res = await modelCaller({
       model: deployment,
       instructions: role.instructions,
