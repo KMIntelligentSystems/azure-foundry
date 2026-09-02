@@ -1,7 +1,7 @@
 ---
 name: coder
 description: D3 chart coder — writes self-contained chart HTML files, validates each in headless Chromium.
-defaultDeployment: gpt-4.1-mini
+defaultDeployment: gpt-4.1
 tools: [list_files, read_file, write_file, render_validate, save_artifact]
 ---
 

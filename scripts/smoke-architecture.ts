@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { dispatch } from "../src/hosted-agent/toolbox.js";
+import { dispatch, requiredOutputErrors } from "../src/hosted-agent/toolbox.js";
 import { getRole } from "../src/hosted-agent/imports.js";
 import { listSkills, readSkill } from "../src/hosted-agent/skills.js";
 import { validatePlan } from "../src/hosted-agent/validate_plan.js";
@@ -47,11 +47,39 @@ const longVerdict = validatePlan({
   steps: [{ role: "statistician", task: longTask, deployment: "gpt-4.1-mini" }],
 });
 check("validator accepts self-contained tasks over 2000 characters", longTask.length > 2_000 && longVerdict.ok && longVerdict.plan.steps[0]?.task === longTask);
+const strongWorkerVerdict = validatePlan({
+  rationale: "Use the strongest real deployment for high-reasoning work.",
+  continuePlanning: false,
+  steps: [{ role: "statistician", task: "Run the validated statistical workflow.", deployment: "gpt-4.1" }],
+});
+check("validator permits real gpt-4.1 statistician worker", strongWorkerVerdict.ok);
 
 const azureMsDelay = retryDelayMs(new Headers({ "x-ms-retry-after-ms": "45000" }), 1);
 check("Foundry retry honors Azure millisecond header", azureMsDelay >= 45_000 && azureMsDelay < 45_500, `${azureMsDelay}ms`);
 const standardDelay = retryDelayMs(new Headers({ "retry-after": "3" }), 1);
 check("Foundry retry honors standard Retry-After seconds", standardDelay >= 3_000 && standardDelay < 3_500, `${standardDelay}ms`);
+
+const invalidAdlWs = fs.mkdtempSync(path.join(os.tmpdir(), "azure-foundry-invalid-adl-"));
+for (const file of ["analysis.md", "model_card.json", "nowcast.csv", "backtest.csv", "residuals.csv", "panel.csv", "chart_feed_part_a.json", "chart_feed_part_b.json", "chart_feed_part_c.json", "chart_feed_part_d.json"]) {
+  fs.writeFileSync(path.join(invalidAdlWs, file), file.endsWith(".json") ? "{}" : "placeholder");
+}
+fs.writeFileSync(path.join(invalidAdlWs, "backtest.csv"), "origin,actual\n2015-01,0.1\n2015-02,0.2\n");
+fs.writeFileSync(path.join(invalidAdlWs, "panel.csv"), "date,x\n2026-01,1\n");
+fs.writeFileSync(path.join(invalidAdlWs, "residuals.csv"), "date,error\n2015-01,0.1\n");
+fs.writeFileSync(path.join(invalidAdlWs, "nowcast.csv"), "term,growth,level\npoint,0.1,100\npi_80_lower,0.1,100\npi_80_upper,0.1,100\npi_95_lower,0.1,100\npi_95_upper,0.1,100\n");
+const invalidAdlErrors = requiredOutputErrors(getRole("statistician")!, "adl-monthly-nowcast LASSO-CV elastic-net", invalidAdlWs);
+check("ADL contract rejects two-origin backtest and degenerate PIs", invalidAdlErrors.some((e) => e.includes("136 origins")) && invalidAdlErrors.some((e) => e.includes("degenerate 80%")));
+const invalidPersist = await dispatch("persist_artifacts", {
+  category: "Economics",
+  subject: "June 2026 ADL",
+  tags: "m3,adl,nowcast,june-2026",
+  files: [
+    "analysis.md", "model_card.json", "nowcast.csv", "backtest.csv", "residuals.csv", "panel.csv",
+    "chart_feed_part_a.json", "chart_feed_part_b.json", "chart_feed_part_c.json", "chart_feed_part_d.json",
+  ].map((file) => ({ path: file, title: `Invalid test ${file}` })),
+}, ["persist_artifacts"], invalidAdlWs, { userId: "admin" });
+check("invalid ADL bundle cannot be persisted", !invalidPersist.ok && invalidPersist.error?.code === "artifact_validation_failed", invalidPersist.error?.message ?? "");
+fs.rmSync(invalidAdlWs, { recursive: true, force: true });
 
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "azure-foundry-stage-"));
 const python = await dispatch("execute_python", {

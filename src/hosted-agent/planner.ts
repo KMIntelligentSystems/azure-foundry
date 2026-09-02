@@ -26,17 +26,17 @@ export interface Plan {
 
 export interface DeploymentEntry {
   name: string;
-  /** "planner" may only plan; "worker" may only run steps. */
-  kind: "planner" | "worker";
+  /** Deployment seat capability. "both" may plan and run worker steps. */
+  kind: "planner" | "worker" | "both";
   costHint: string; // shown to the planner so allocation is informed
 }
 
 export const ALLOWLIST: DeploymentEntry[] = [
-  // NOTE: gpt-5.6-sol (the design-doc planner) has zero quota in this subscription
-  // (2026-08-19; deployment request → InsufficientQuota). gpt-4.1 is the deployed
-  // strong planner until a quota request lands.
-  { name: "gpt-4.1", kind: "planner", costHint: "strongest deployed; planning only" },
-  { name: "gpt-4.1-mini", kind: "worker", costHint: "cheap + fast; default for routine steps" },
+  // Both names are real Foundry deployments. gpt-4.1 is also used by the
+  // planner, but it remains a valid worker for high-reasoning statistics and
+  // chart production; no synthetic deployment aliases are used.
+  { name: "gpt-4.1", kind: "both", costHint: "strongest deployed; planner plus statistician/coder worker" },
+  { name: "gpt-4.1-mini", kind: "worker", costHint: "fast; use for reader/operator and routine steps" },
 ];
 
 export const PLANNER_DEPLOYMENT = "gpt-4.1";
@@ -71,8 +71,15 @@ RULES:
   text. A task that says "fetch the provided URL" without the URL is a failed
   plan.
 - INDICATOR PANEL: when the task involves refresh.db:indicator_history — the ADL
-  panel, nowcasts, leading indicators — route to statistician (it has the panel
-  read + Python verbs); reader and catalog roles cannot do that work.
+  panel, nowcasts, leading indicators — route to statistician on gpt-4.1 (it has
+  the panel read + Python verbs); reader and operator roles cannot do that work.
+- SAVE/CATALOG: when the user says save, persist, add to artifacts.db,
+  catalogue/catalog, or display produced artifacts in Documents, route to the
+  operator. Preserve the user's exact category/subject label in the task. Saving
+  must use persist_artifacts and return verified artifact IDs. Never substitute
+  sync_indicator_history unless the user explicitly asks to sync/update/push
+  the indicator backbone or refresh history.
+- CHARTS: use coder on gpt-4.1 for requested chart galleries.
 - Do not invent roles. If the prompt needs no roles, emit a plan with a single
   step whose role best answers directly.
 

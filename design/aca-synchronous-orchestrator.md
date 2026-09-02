@@ -87,6 +87,10 @@ Vite connects to `ws://localhost:8080/ws/agent` by default in development.
 The browser persists the active `conversation_id` across reloads. Terminal
 artifact collection uploads pending files to artifact-service storage without
 publishing them into the catalog; the returned URLs are rendered through the
-in-app authenticated viewer. Generic failures still return a terminal partial
+in-app authenticated viewer. A later explicit save/persist/catalogue request
+routes to operator `persist_artifacts`, creates and verifies artifacts.db rows
+under the requested category/subject, and emits `catalog_updated` immediately.
+Backbone `sync_indicator_history` is a separate operation and cannot satisfy a
+catalog request. Generic failures still return a terminal partial
 result. If the user intentionally starts a new conversation, `import_run_file`
 can recover an explicitly named same-user prior-run file.

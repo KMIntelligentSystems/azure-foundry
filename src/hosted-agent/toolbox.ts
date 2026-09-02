@@ -142,7 +142,12 @@ async function saveArtifactToCatalog(
   if (fileError) return fileError;
 
   const content = fs.readFileSync(fullPath);
-  const mimeType = path.endsWith(".html") ? "text/html" : path.endsWith(".json") ? "application/json" : path.endsWith(".md") ? "text/markdown" : "application/octet-stream";
+  const mimeType = path.endsWith(".html") ? "text/html"
+    : path.endsWith(".json") ? "application/json"
+      : path.endsWith(".csv") ? "text/csv"
+        : path.endsWith(".md") ? "text/markdown"
+          : path.endsWith(".txt") ? "text/plain"
+            : "application/octet-stream";
 
   // Upload file content to artifact service (which stores it + returns URL)
   /*
@@ -184,6 +189,97 @@ async function saveArtifactToCatalog(
   } catch (e) {
     return err("network_error", e instanceof Error ? e.message : String(e));
   }
+}
+
+async function persistArtifactBundle(
+  args: Record<string, unknown>,
+  ws: string,
+  userId: string,
+): Promise<ToolResult> {
+  const category = String(args["category"] ?? "").trim();
+  const subject = String(args["subject"] ?? "").trim();
+  const tags = args["tags"] == null ? undefined : String(args["tags"]);
+  const files = Array.isArray(args["files"])
+    ? args["files"] as Array<{ path?: unknown; title?: unknown }>
+    : [];
+  if (!category || !subject || files.length === 0) {
+    return err("invalid_args", "category, subject, and at least one file are required");
+  }
+  if (files.length > 50) return err("invalid_args", "at most 50 files may be persisted per call");
+  const requested = files.map((file) => ({
+    path: String(file.path ?? "").trim(),
+    title: String(file.title ?? "").trim(),
+  }));
+  if (requested.some((file) => !file.path || !file.title)) {
+    return err("invalid_args", "every file requires a non-empty path and title");
+  }
+  if (new Set(requested.map((file) => file.title.toLowerCase())).size !== requested.length) {
+    return err("invalid_args", "artifact titles must be distinct");
+  }
+  const requestedPaths = new Set(requested.map((file) => file.path.replace(/\\/g, "/")));
+  const looksLikeAdlBundle = /\b(adl|nowcast)\b/i.test(`${subject} ${tags ?? ""}`) ||
+    ["analysis.md", "model_card.json", "nowcast.csv", "backtest.csv", "residuals.csv", "panel.csv"]
+      .every((path) => requestedPaths.has(path));
+  if (looksLikeAdlBundle) {
+    const validationErrors = requiredOutputErrors(
+      { name: "statistician" } as Role,
+      "adl-monthly-nowcast LASSO-CV elastic-net",
+      ws,
+    );
+    if (validationErrors.length > 0) {
+      return err("artifact_validation_failed", `ADL bundle is not publishable: ${validationErrors.join("; ")}`);
+    }
+  }
+
+  let existing: CatalogEntry[] = [];
+  try {
+    const list = await fetch(`${artifactServiceUrl()}/artifacts`, {
+      headers: { "X-User-Id": userId, "X-User-Role": userId === "admin" ? "admin" : "user" },
+    });
+    if (list.ok) existing = ((await list.json()) as { artifacts?: CatalogEntry[] }).artifacts ?? [];
+  } catch { /* individual post-save verification still protects correctness */ }
+
+  const persisted: Array<{ path: string; title: string; artifactId: string; url: string; status: "created" | "existing" }> = [];
+  const failed: Array<{ path: string; reason: string }> = [];
+  for (const file of requested) {
+    const prior = existing.find((entry) =>
+      entry.user_id === userId && entry.category === category && entry.subject === subject && entry.title === file.title,
+    );
+    if (prior) {
+      persisted.push({ path: file.path, title: file.title, artifactId: prior.id, url: prior.url, status: "existing" });
+      continue;
+    }
+    const result = await saveArtifactToCatalog({ path: file.path, title: file.title, category, subject, tags }, ws, userId);
+    if (!result.ok) {
+      failed.push({ path: file.path, reason: result.error?.message ?? "save failed" });
+      continue;
+    }
+    const saved = result.result as { artifactId?: string; url?: string };
+    if (!saved.artifactId || !saved.url) {
+      failed.push({ path: file.path, reason: "save returned no artifact id or URL" });
+      continue;
+    }
+    const verify = await fetch(`${artifactServiceUrl()}/artifacts/${encodeURIComponent(saved.artifactId)}`, {
+      headers: { "X-User-Id": userId, "X-User-Role": userId === "admin" ? "admin" : "user" },
+    });
+    if (!verify.ok) {
+      failed.push({ path: file.path, reason: `post-save catalog verification HTTP ${verify.status}` });
+      continue;
+    }
+    persisted.push({ path: file.path, title: file.title, artifactId: saved.artifactId, url: saved.url, status: "created" });
+  }
+
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      result: { category, subject, persisted, failed },
+      error: {
+        code: "persist_incomplete",
+        message: `persisted ${persisted.length}/${requested.length}; ${failed.map((item) => `${item.path}: ${item.reason}`).join("; ")}`.slice(0, 400),
+      },
+    };
+  }
+  return ok({ category, subject, persisted, verifiedCount: persisted.length, catalogUpdated: true });
 }
 
 // ── Catalog read tools (artifact service) ────────────────────────────────
@@ -776,6 +872,39 @@ const CATALOG: Record<string, ToolDef> = {
     },
     run: async (a, ws, ctx) => saveArtifactToCatalog(a, ws, ctx?.userId ?? "unknown"),
   },
+  persist_artifacts: {
+    spec: {
+      type: "function",
+      name: "persist_artifacts",
+      description:
+        "Persist a bundle of workspace files into artifacts.db under category/subject taxonomy and verify every artifact id. " +
+        "This updates the Documents catalog; it does not sync indicator history or call the refresh daemon.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          category: { type: "string", description: "Catalog category, e.g. Economics" },
+          subject: { type: "string", description: "Catalog subject/label exactly requested by the user" },
+          tags: { type: ["string", "null"], description: "Comma-separated bundle tags" },
+          files: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "Workspace-relative file path" },
+                title: { type: "string", description: "Distinct human-readable sidebar title" },
+              },
+              required: ["path", "title"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["category", "subject", "tags", "files"],
+        additionalProperties: false,
+      },
+    },
+    run: async (a, ws, ctx) => persistArtifactBundle(a, ws, ctx?.userId ?? "unknown"),
+  },
   sync_indicator_history: {
     spec: {
       type: "function",
@@ -965,7 +1094,7 @@ export async function dispatch(
 // budgeting. Long scientific work is bounded inside execute_python by its
 // CPU/wall limits; the role itself must not abort a valid multi-minute run.
 const MAX_MODEL_CALLS = 30;
-const MAX_TOOL_EXECUTIONS = 30;
+const MAX_TOOL_EXECUTIONS = 80;
 const MAX_OUTPUT_TOKENS_PER_CALL = 8192;
 
 export interface RoleRunResult {
@@ -973,25 +1102,107 @@ export interface RoleRunResult {
   usage: { input: number; output: number };
   modelCalls: number;
   toolExecutions: number;
+  catalogUpdated: boolean;
   terminatedBy: "finish" | "text" | "limit";
 }
 
-function requiredOutputErrors(role: Role, task: string, ws: string): string[] {
+function requiresCatalogPersistence(role: Role, task: string): boolean {
+  return role.name === "operator" &&
+    /\b(save|persist|catalog(?:ue)?|artifacts?\s*db|documents)\b/i.test(task);
+}
+
+function csvRows(file: string): string[][] {
+  return fs.readFileSync(file, "utf8").trim().split(/\r?\n/).map((line) => line.split(","));
+}
+
+export function requiredOutputErrors(role: Role, task: string, ws: string, catalogUpdated = false): string[] {
+  if (requiresCatalogPersistence(role, task) && !catalogUpdated) {
+    return ["catalog persistence was requested but persist_artifacts has not returned verified artifact ids"];
+  }
+
+  const isGallery = role.name === "coder" && /Part A/i.test(task) && /Part D/i.test(task) && /gallery|charts/i.test(task);
+  if (isGallery) {
+    const chartRoot = path.join(ws, "charts");
+    const charts = fs.existsSync(chartRoot)
+      ? fs.readdirSync(chartRoot).filter((file) => file.toLowerCase().endsWith(".html"))
+      : [];
+    if (charts.length < 18) return [`chart gallery requires at least 18 individual HTML artifacts; found ${charts.length}`];
+  }
+
   const isFullAdl = role.name === "statistician" &&
     /adl-monthly-nowcast/i.test(task) &&
     /LASSO-CV/i.test(task) &&
     /elastic-net/i.test(task);
   if (!isFullAdl) return [];
+  const errors: string[] = [];
   const required = [
     "analysis.md", "model_card.json", "nowcast.csv",
     "backtest.csv", "residuals.csv", "panel.csv",
     "chart_feed_part_a.json", "chart_feed_part_b.json",
     "chart_feed_part_c.json", "chart_feed_part_d.json",
   ];
-  return required.filter((relative) => {
+  for (const relative of required) {
     const full = path.join(ws, relative);
-    return !fs.existsSync(full) || !fs.statSync(full).isFile() || fs.statSync(full).size === 0;
-  }).map((relative) => `missing required ADL output: ${relative}`);
+    if (!fs.existsSync(full) || !fs.statSync(full).isFile() || fs.statSync(full).size === 0) {
+      errors.push(`missing required ADL output: ${relative}`);
+    }
+  }
+  if (errors.length) return errors;
+
+  try {
+    const backtest = csvRows(path.join(ws, "backtest.csv"));
+    const origins = backtest.slice(1).map((row) => row[0]);
+    if (origins.length !== 136 || origins[0] !== "2015-01" || origins.at(-1) !== "2026-04") {
+      errors.push(`backtest.csv must contain 136 origins from 2015-01 through 2026-04; found ${origins.length}, ${origins[0] ?? "none"} through ${origins.at(-1) ?? "none"}`);
+    }
+  } catch (error) {
+    errors.push(`invalid backtest.csv: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const panel = csvRows(path.join(ws, "panel.csv"));
+    if (panel.length - 1 < 200 || panel[0].length < 29) {
+      errors.push(`panel.csv is not a full modeling panel: ${panel.length - 1} rows, ${panel[0]?.length ?? 0} columns`);
+    }
+  } catch (error) {
+    errors.push(`invalid panel.csv: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const residuals = csvRows(path.join(ws, "residuals.csv"));
+    if (residuals.length - 1 < 100) errors.push(`residuals.csv must contain substantive fitted/walk-forward errors; found ${residuals.length - 1} rows`);
+  } catch (error) {
+    errors.push(`invalid residuals.csv: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const rows = csvRows(path.join(ws, "nowcast.csv")).slice(1);
+    const terms = new Map(rows.map((row) => [row[0], { growth: Number(row[1]), level: Number(row[2]) }]));
+    for (const interval of ["80", "95"]) {
+      const lower = terms.get(`pi_${interval}_lower`);
+      const upper = terms.get(`pi_${interval}_upper`);
+      const point = terms.get("point");
+      if (!lower || !upper || !point || !(lower.growth < point.growth && point.growth < upper.growth) || !(lower.level < point.level && point.level < upper.level)) {
+        errors.push(`nowcast.csv has missing or degenerate ${interval}% prediction interval`);
+      }
+    }
+  } catch (error) {
+    errors.push(`invalid nowcast.csv: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const card = JSON.parse(fs.readFileSync(path.join(ws, "model_card.json"), "utf8")) as Record<string, unknown>;
+    const metrics = card["cv_metrics"] as Record<string, unknown> | undefined;
+    const features = card["features"] as unknown[] | undefined;
+    if (!metrics || !["naive_floor", "adl_ols_bic", "lasso_cv", "elastic_net_cv"].every((key) => metrics[key])) {
+      errors.push("model_card.json lacks all four model CV metrics");
+    }
+    if (!features || features.length !== 28) errors.push(`model_card.json must list 28 features; found ${features?.length ?? 0}`);
+    if (typeof card["survey_block_delta_rmse"] !== "number") errors.push("model_card.json lacks numeric survey_block_delta_rmse");
+  } catch (error) {
+    errors.push(`invalid model_card.json: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const analysis = fs.readFileSync(path.join(ws, "analysis.md"), "utf8");
+  for (const caveat of ["SA freeze", "COVID", "NAICS-2017", "empirical"]) {
+    if (!analysis.toLowerCase().includes(caveat.toLowerCase())) errors.push(`analysis.md lacks required caveat: ${caveat}`);
+  }
+  return errors;
 }
 
 export async function runRole(
@@ -1014,6 +1225,7 @@ export async function runRole(
   const usage = { input: 0, output: 0 };
   let modelCalls = 0;
   let toolExecutions = 0;
+  let catalogUpdated = false;
 
   const input: unknown[] = [
     { role: "user", content: `TASK:\n${task}\n\nUPSTREAM RESULTS:\n${upstreamText || "(none)"}\n\nWorkspace files persist across steps of this conversation. Call finish(output) when done.` },
@@ -1039,7 +1251,7 @@ export async function runRole(
     input.push(...res.rawOutput);
     const calls = res.functionCalls;
     if (calls.length === 0) {
-      const contractErrors = requiredOutputErrors(role, task, ws);
+      const contractErrors = requiredOutputErrors(role, task, ws, catalogUpdated);
       if (contractErrors.length > 0) {
         input.push({
           role: "user",
@@ -1054,7 +1266,7 @@ export async function runRole(
 
     for (const c of calls) {
       if (c.name === "finish") {
-        const contractErrors = requiredOutputErrors(role, task, ws);
+        const contractErrors = requiredOutputErrors(role, task, ws, catalogUpdated);
         if (contractErrors.length > 0) {
           input.push({
             type: "function_call_output",
@@ -1074,6 +1286,10 @@ export async function runRole(
       }
       toolExecutions++;
       const tr = await dispatch(c.name, c.args, allowed, ws, ctx);
+      if (c.name === "persist_artifacts" && tr.ok &&
+          (tr.result as { catalogUpdated?: boolean } | undefined)?.catalogUpdated === true) {
+        catalogUpdated = true;
+      }
       input.push({
         type: "function_call_output",
         call_id: c.callId,
@@ -1084,5 +1300,5 @@ export async function runRole(
   }
 
   if (!output) output = `step aborted: ${MAX_MODEL_CALLS} model calls exhausted`;
-  return { output, usage, modelCalls, toolExecutions, terminatedBy };
+  return { output, usage, modelCalls, toolExecutions, catalogUpdated, terminatedBy };
 }

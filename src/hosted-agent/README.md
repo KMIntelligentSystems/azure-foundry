@@ -121,8 +121,8 @@ package: a fresh `npm i playwright` needs `npx playwright install chromium`
 | Module | Role |
 |---|---|
 | `artifacts.ts` | workspace → classified manifest (chart/data/notes/other), pending-file upload to artifact-service (not catalog publication), URL-bearing pending tree; generic turn failure returns this partial manifest |
-| planner/worker seats | `gpt-4.1` is planner-only; all worker roles, including statistician, use the deployed `gpt-4.1-mini` worker |
-| response contract | `OrchestratorResult.artifacts[]` + pending tree appended to finish text |
+| planner/worker seats | both are real deployments: `gpt-4.1` plans and runs statistician/coder steps; `gpt-4.1-mini` runs reader/operator/routine steps |
+| response contract | `OrchestratorResult.artifacts[]` + pending tree appended to finish text; explicit `persist_artifacts` saves verified taxonomy rows and emits `catalog_updated` for immediate Documents refresh |
 
 **Proven** (`scripts/smoke-chunk6.ts`, the ADL flow in miniature, one conversation):
 reader wrote CSV → statistician ran real OLS (R²=0.9995) + wrote notes/model.json

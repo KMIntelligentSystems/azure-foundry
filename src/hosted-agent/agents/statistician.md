@@ -1,7 +1,7 @@
 ---
 name: statistician
 description: Applied statistician — discovers and reads a SKILL.md, authors Python against staged data, and reports with explicit uncertainty.
-defaultDeployment: gpt-4.1-mini
+defaultDeployment: gpt-4.1
 tools: [list_skills, read_skill, list_files, read_file, write_file, execute_python]
 ---
 

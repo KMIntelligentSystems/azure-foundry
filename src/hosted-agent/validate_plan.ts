@@ -17,7 +17,7 @@ const MAX_STEPS = 5;
 export function validatePlan(plan: Plan): PlanVerdict {
   const errors: string[] = [];
   const workerDeployments = new Set(
-    ALLOWLIST.filter((d) => d.kind === "worker").map((d) => d.name),
+    ALLOWLIST.filter((d) => d.kind === "worker" || d.kind === "both").map((d) => d.name),
   );
   const plannerDeployments = new Set(
     ALLOWLIST.filter((d) => d.kind === "planner").map((d) => d.name),

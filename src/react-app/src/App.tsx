@@ -196,6 +196,10 @@ function FoundryApp() {
       case "replanning":
         addThinking("status", `Returning discovery results to planner${round}`);
         break;
+      case "catalog_updated":
+        setCatalogRefreshKey((key) => key + 1);
+        addThinking("status", "Catalog updated", "Saved artifacts are now available in Documents.");
+        break;
       case "agent_end":
         addThinking(
           "agent_end",

@@ -28,6 +28,7 @@ export interface StepResult {
   round: number;
   modelCalls: number;
   toolExecutions: number;
+  catalogUpdated: boolean;
   terminatedBy: "finish" | "text" | "limit";
 }
 
@@ -72,6 +73,7 @@ async function executeStep(
     output: res.output, usage: res.usage, round,
     modelCalls: res.modelCalls,
     toolExecutions: res.toolExecutions,
+    catalogUpdated: res.catalogUpdated,
     terminatedBy: res.terminatedBy,
   };
 }
@@ -169,6 +171,9 @@ export async function orchestrate(
           toolExecutions: result.toolExecutions,
           terminatedBy: result.terminatedBy,
         });
+        if (result.catalogUpdated) {
+          await emit(eventSink, { type: "catalog_updated", conversationId: id });
+        }
       }
 
       if (!verdict.plan.continuePlanning) {
