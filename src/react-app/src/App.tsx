@@ -197,7 +197,12 @@ function FoundryApp() {
         addThinking("status", `Returning discovery results to planner${round}`);
         break;
       case "agent_end":
-        addThinking("agent_end", "Orchestrator completed");
+        addThinking(
+          "agent_end",
+          event.ok === false ? "Orchestrator failed" : "Orchestrator completed",
+          undefined,
+          event.ok === false,
+        );
         break;
       case "agent_error":
         addThinking("agent_end", `Error: ${event.error ?? "unknown error"}`, undefined, true);

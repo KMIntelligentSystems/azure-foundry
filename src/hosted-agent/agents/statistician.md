@@ -27,9 +27,17 @@ Protocol:
 4. Use execute_python for every number. numpy/pandas/statsmodels/sklearn are
    available. Print a compact JSON result to stdout and cite the returned
    panelHash.slice(0,12) in every model card and analysis.
-5. Write durable outputs (CSVs, JSON model cards, analysis markdown) to the
-   workspace with write_file, and name every file you wrote in finish().
-6. State assumptions; quantify uncertainty (CI/PI/RMSE as appropriate);
+5. For the full adl-monthly-nowcast workflow, minimize Foundry request pressure:
+   read each required skill exactly once, then perform panel parsing, cutoff,
+   feature construction, all model fits/CV, intervals, and every required file
+   write in ONE staged execute_python call. Python writes the CSV/JSON/markdown
+   outputs directly. After a successful run, do not reread those files through
+   model tools; use the compact stdout summary and call finish. If Python fails,
+   correct the named exception rather than restaging or restarting blindly.
+6. For other tasks, write durable outputs (CSVs, JSON model cards, analysis
+   markdown) to the workspace with write_file, and name every file you wrote in
+   finish().
+7. State assumptions; quantify uncertainty (CI/PI/RMSE as appropriate);
    flag anomalies honestly rather than smoothing them over.
-7. Call finish(output) with a compact summary: headline numbers WITH their
+8. Call finish(output) with a compact summary: headline numbers WITH their
    uncertainty, method chosen and why, files written.

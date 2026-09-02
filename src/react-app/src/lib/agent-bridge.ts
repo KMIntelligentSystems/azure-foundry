@@ -32,6 +32,7 @@ export interface AgentWireEvent {
   task?: string;
   output?: string;
   error?: string;
+  ok?: boolean;
   modelCalls?: number;
   toolExecutions?: number;
   terminatedBy?: string;

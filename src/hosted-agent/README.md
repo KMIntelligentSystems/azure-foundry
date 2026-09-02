@@ -91,7 +91,8 @@ gates pass: unknown_tool, catalog gate, path_escape, unpriced-deployment refusal
 
 | Module | Role |
 |---|---|
-| `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, asynchronous `python -I` child (so gateway heartbeats continue), configurable CPU/wall limits, ACA cgroup memory, stdout contract |
+| `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, asynchronous `python -I` child (so gateway heartbeats continue), configurable CPU/wall limits, ACA cgroup memory, stdout contract; full ADL uses one staged Python computation/write pass |
+| `foundry.ts` | single Responses API boundary; retries network errors and HTTP 408/409/429/5xx using Retry-After/Azure rate-reset headers, bounded exponential backoff, and jitter |
 | `agents/statistician.md` | defaultDeployment gpt-4.1-mini, tools incl. execute_python |
 | `Dockerfile.agent` | python3 + pinned numpy/pandas/statsmodels/scikit-learn (full-bookworm base) |
 | `validate_plan.ts` | partial rejection is non-fatal: surviving steps proceed, dropped steps reported as validationErrors |

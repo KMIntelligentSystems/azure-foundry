@@ -5,6 +5,7 @@ import { dispatch } from "../src/hosted-agent/toolbox.js";
 import { getRole } from "../src/hosted-agent/imports.js";
 import { listSkills, readSkill } from "../src/hosted-agent/skills.js";
 import { validatePlan } from "../src/hosted-agent/validate_plan.js";
+import { retryDelayMs } from "../src/hosted-agent/foundry.js";
 
 let failed = false;
 const check = (name: string, condition: boolean, detail = "") => {
@@ -46,6 +47,11 @@ const longVerdict = validatePlan({
   steps: [{ role: "statistician", task: longTask, deployment: "gpt-4.1-mini" }],
 });
 check("validator accepts self-contained tasks over 2000 characters", longTask.length > 2_000 && longVerdict.ok && longVerdict.plan.steps[0]?.task === longTask);
+
+const azureMsDelay = retryDelayMs(new Headers({ "x-ms-retry-after-ms": "45000" }), 1);
+check("Foundry retry honors Azure millisecond header", azureMsDelay >= 45_000 && azureMsDelay < 45_500, `${azureMsDelay}ms`);
+const standardDelay = retryDelayMs(new Headers({ "retry-after": "3" }), 1);
+check("Foundry retry honors standard Retry-After seconds", standardDelay >= 3_000 && standardDelay < 3_500, `${standardDelay}ms`);
 
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "azure-foundry-stage-"));
 const python = await dispatch("execute_python", {

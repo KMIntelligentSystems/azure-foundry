@@ -74,7 +74,9 @@ Vite connects to `ws://localhost:8080/ws/agent` by default in development.
    support, managed identity, and `minReplicas=1`, `maxReplicas=1` initially.
 3. Supply the Foundry project/model, artifact-service, origin, and identity
    environment configuration already used by the hosted-agent runtime. Optional
-   `PYTHON_TIMEOUT_MS` and `PYTHON_CPU_SECS` override scientific-run limits.
+   `PYTHON_TIMEOUT_MS` and `PYTHON_CPU_SECS` override scientific-run limits;
+   `FOUNDRY_MAX_ATTEMPTS` and `FOUNDRY_MAX_RETRY_DELAY_MS` tune bounded
+   header-aware retry behavior for 429/408/409/5xx and network failures.
 4. Set `VITE_AGENT_WS_URL` in the SWA build and redeploy the frontend. The
    canonical production SWA is `react_app` at
    `https://icy-forest-04e89460f.7.azurestaticapps.net`; the separately created
