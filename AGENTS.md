@@ -4,6 +4,8 @@ This project was built with the microsoft-foundry skill. Before working on or an
 
 ## Architecture invariants
 
+- The dynamic-orchestrator redesign is staged. Step 1 defines the dormant `delegate`/`finish` action protocol in `src/hosted-agent/orchestrator-protocol.ts`; the live runtime remains on the existing planner/executor until the executor and orchestration-loop steps are implemented and reviewed. The protocol permits multiple delegate calls per model response and validates each batch all-or-nothing; it does not encode a fixed workflow graph.
+
 - `src/hosted-agent/agents/*.md` define the deployed application's stable role behavior and tool grants.
 - `src/hosted-agent/skills/*/SKILL.md` define the deployed application's behavioral methods. Skills are read and interpreted by agents; do not replace them with deterministic statistical pipelines.
 - These runtime catalogs are application-owned resources. They are not pi-harness paths and are not automatically discovered or executed by Microsoft Foundry.
