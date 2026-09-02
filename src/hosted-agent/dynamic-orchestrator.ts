@@ -10,6 +10,7 @@ import {
   type OrchestratorAction,
 } from "./orchestrator-protocol.js";
 import { ALLOWLIST, PLANNER_DEPLOYMENT } from "./planner.js";
+import { PendingArtifactRegistry, type PendingArtifactRecord } from "./pending-artifact-registry.js";
 
 export interface DynamicOrchestratorEvent {
   type:
@@ -47,6 +48,7 @@ export interface DynamicOrchestratorResult {
   rounds: DynamicOrchestratorRound[];
   delegations: DelegationResult[];
   artifacts: DelegationResult["artifacts"];
+  pendingArtifacts: PendingArtifactRecord[];
   usage: { input: number; output: number };
   error?: string;
 }
@@ -70,11 +72,18 @@ export type DelegationRunner = (
   stageArtifacts?: DelegationArtifactStager,
 ) => Promise<DelegationResult>;
 
+export interface PendingArtifactRegistryLike {
+  register(artifacts: readonly DelegationResult["artifacts"][number][]): PendingArtifactRecord[];
+  list(): PendingArtifactRecord[];
+  stageArtifacts: DelegationArtifactStager;
+}
+
 export interface DynamicOrchestratorDependencies {
   modelCaller?: (options: CallOpts) => Promise<LlmResult>;
   delegationRunner?: DelegationRunner;
   roles?: Role[];
   workerDeployments?: string[];
+  pendingRegistryFactory?: (runId: string) => PendingArtifactRegistryLike;
 }
 
 class Semaphore {
@@ -294,6 +303,8 @@ export async function runDynamicOrchestrator(
 
   const modelCaller = dependencies.modelCaller ?? callLlm;
   const runner = dependencies.delegationRunner ?? defaultDelegationRunner;
+  const registry = dependencies.pendingRegistryFactory?.(runId) ?? new PendingArtifactRegistry(runId);
+  const stageArtifacts = options.stageArtifacts ?? registry.stageArtifacts;
   const instructions = dynamicOrchestratorInstructions(roles, workerDeployments);
   const input: unknown[] = [{ role: "user", content: userPrompt }];
   const rounds: DynamicOrchestratorRound[] = [];
@@ -345,6 +356,7 @@ export async function runDynamicOrchestrator(
           rounds,
           delegations: allDelegations,
           artifacts: allDelegations.flatMap((result) => result.artifacts),
+          pendingArtifacts: registry.list(),
           usage,
         };
       }
@@ -359,9 +371,10 @@ export async function runDynamicOrchestrator(
         userId: options.userId,
         globalConcurrency: options.globalConcurrency,
         perDeploymentConcurrency: options.perDeploymentConcurrency,
-        stageArtifacts: options.stageArtifacts,
+        stageArtifacts,
         eventSink: options.eventSink,
       }, runner);
+      registry.register(results.flatMap((result) => result.artifacts));
       allDelegations.push(...results);
       rounds.push({ round, actions: verdict.actions, delegations: results, usage: response.usage });
       for (let index = 0; index < delegates.length; index++) {
@@ -383,6 +396,7 @@ export async function runDynamicOrchestrator(
       rounds,
       delegations: allDelegations,
       artifacts: allDelegations.flatMap((result) => result.artifacts),
+      pendingArtifacts: registry.list(),
       usage,
       error: message,
     };

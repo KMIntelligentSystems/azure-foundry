@@ -3,11 +3,47 @@ import {
   executeDelegationBatch,
   runDynamicOrchestrator,
   type DelegationRunner,
+  type PendingArtifactRegistryLike,
 } from "../src/hosted-agent/dynamic-orchestrator.js";
 import type { DelegationResult } from "../src/hosted-agent/delegate-executor.js";
 import type { CallOpts, LlmResult } from "../src/hosted-agent/foundry.js";
 import type { Role } from "../src/hosted-agent/imports.js";
 import type { DelegateAction } from "../src/hosted-agent/orchestrator-protocol.js";
+import type { PendingArtifactRecord } from "../src/hosted-agent/pending-artifact-registry.js";
+
+function memoryRegistry(): PendingArtifactRegistryLike {
+  const records = new Map<string, PendingArtifactRecord>();
+  return {
+    register(artifacts) {
+      const added = artifacts.map((artifact) => {
+        const record: PendingArtifactRecord = {
+          id: artifact.id,
+          runId: artifact.runId,
+          callId: artifact.callId,
+          agent: artifact.agent,
+          workspaceId: artifact.workspaceId,
+          sourcePath: artifact.path,
+          title: artifact.path.split("/").at(-1) ?? artifact.path,
+          kind: artifact.kind,
+          mimeType: artifact.mimeType,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256,
+          createdAt: new Date().toISOString(),
+          state: "pending",
+        };
+        records.set(record.id, record);
+        return record;
+      });
+      return added;
+    },
+    list: () => [...records.values()],
+    stageArtifacts: async (artifactIds) => artifactIds.map((artifactId) => {
+      const record = records.get(artifactId);
+      if (!record) throw new Error(`unknown fixture artifact ${artifactId}`);
+      return { artifactId, path: `inputs/${artifactId}/${record.title}`, bytes: record.bytes, title: record.title, mimeType: record.mimeType };
+    }),
+  };
+}
 
 const roles: Role[] = [
   { name: "statistician", description: "Applied statistics", defaultDeployment: "gpt-4.1", toolNames: [], instructions: "stats" },
@@ -47,9 +83,9 @@ function result(runId: string, action: DelegateAction): DelegationResult {
       kind: "data",
       bytes: 20,
       mimeType: "application/json",
+      sha256: `hash-${action.callId}`,
     }],
-    catalogUpdated: false,
-  } as DelegationResult & { catalogUpdated: boolean };
+  };
 }
 
 // Batch-level proof: same-deployment actions overlap, but never exceed the
@@ -140,12 +176,15 @@ const run = await runDynamicOrchestrator("Analyze this request dynamically.", {
   workerDeployments: ["gpt-4.1", "gpt-4.1-mini"],
   modelCaller,
   delegationRunner: loopRunner,
+  pendingRegistryFactory: () => memoryRegistry(),
 });
 assert.equal(run.ok, true);
 assert.equal(run.response, "Dynamic orchestration completed.");
 assert.equal(run.rounds.length, 3);
 assert.equal(run.delegations.length, 3);
 assert.equal(run.artifacts.length, 3);
+assert.equal(run.pendingArtifacts.length, 3);
+assert.deepEqual(run.pendingArtifacts.map((artifact) => artifact.id), ["pending-d1", "pending-d2", "pending-d3"]);
 assert.equal(loopMaxActive, 2);
 assert.equal(modelRound, 3);
 assert.equal(roundTwoInput.length > 0, true);
@@ -161,6 +200,7 @@ const invalid = await runDynamicOrchestrator("Do something.", { runId: "invalid-
   modelCaller: async () => llm([
     { callId: "bad", name: "delegate", args: { agent: "invented", task: "bad", deployment: "gpt-4.1", inputArtifactIds: [] } },
   ], [{ type: "function_call", call_id: "bad", name: "delegate", arguments: "{}" }]),
+  pendingRegistryFactory: () => memoryRegistry(),
   delegationRunner: async (runId, action) => {
     invalidRunnerCalled = true;
     return result(runId, action);

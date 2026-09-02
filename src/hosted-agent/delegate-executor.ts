@@ -30,6 +30,7 @@ export interface DelegationArtifactRef extends ArtifactRef {
   callId: string;
   agent: string;
   workspaceId: string;
+  sha256: string;
 }
 
 export interface DelegationResult {
@@ -197,6 +198,7 @@ export async function executeDelegation(
         callId: action.callId,
         agent: action.agent,
         workspaceId,
+        sha256: after.get(artifact.path)!.sha256,
       }));
     const succeeded = run.terminatedBy !== "limit";
     return {
@@ -227,6 +229,7 @@ export async function executeDelegation(
         callId: action.callId,
         agent: action.agent,
         workspaceId,
+        sha256: after.get(artifact.path)!.sha256,
       }));
     const message = error instanceof Error ? error.message : String(error);
     return {

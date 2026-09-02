@@ -15,7 +15,10 @@
     "test:architecture": "tsx scripts/smoke-architecture.ts",
     "test:orchestrator-protocol": "tsx scripts/test-orchestrator-protocol.ts",
     "test:delegate-executor": "tsx scripts/test-delegate-executor.ts",
-    "test:dynamic-orchestrator": "tsx scripts/test-dynamic-orchestrator.ts"
+    "test:dynamic-orchestrator": "tsx scripts/test-dynamic-orchestrator.ts",
+    "test:artifact-handoff": "tsx scripts/test-artifact-handoff.ts",
+    "test:dynamic-redesign": "npm run test:orchestrator-protocol && npm run test:delegate-executor && npm run test:dynamic-orchestrator && npm run test:pending-artifacts && npm run test:artifact-handoff",
+    "test:pending-artifacts": "tsx scripts/test-pending-artifact-registry.ts"
   },
   "keywords": [
     "azure",
