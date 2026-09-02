@@ -39,6 +39,14 @@ const verdict = validatePlan({
 });
 check("validator preserves iterative continuation", verdict.ok && verdict.plan.continuePlanning);
 
+const longTask = `Run the full self-contained ADL specification. ${"preserve cutoff, release calendar, models, validation, intervals, outputs, and chart feeds. ".repeat(30)}`;
+const longVerdict = validatePlan({
+  rationale: "A complex statistical task must remain self-contained.",
+  continuePlanning: false,
+  steps: [{ role: "statistician", task: longTask, deployment: "gpt-4.1-mini" }],
+});
+check("validator accepts self-contained tasks over 2000 characters", longTask.length > 2_000 && longVerdict.ok && longVerdict.plan.steps[0]?.task === longTask);
+
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "azure-foundry-stage-"));
 const python = await dispatch("execute_python", {
   code: "import json\nwith open('inputs/panel.json') as f: p=json.load(f)\nprint(json.dumps({'series':len(p['rows']),'hash':p['panelHash'][:12]}))",

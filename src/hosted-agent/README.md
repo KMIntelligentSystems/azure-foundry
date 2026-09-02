@@ -40,7 +40,7 @@ registered via the SDK, invoked over the Invocations protocol.
 | `foundry.ts` | the ONLY LLM caller; agent-identity token cached; stateless `store:false` |
 | `imports.ts` | agents/*.md → compiled catalogue (researcher.md, writer.md — echo-class) |
 | `planner.ts` | call 1: structured `emit_plan`; planner/worker deployment allowlist |
-| `validate_plan.ts` | pure gate: role existence, planner-deployments-can't-work, ≤5 steps |
+| `validate_plan.ts` | pure gate: role existence, planner-deployments-can't-work, ≤5 steps, non-empty self-contained tasks; no arbitrary task-length ceiling |
 | `orchestrator.ts` | sequential step execution (chain passes upstream outputs forward) |
 | `server.ts` | /invocations routes `{promptText}` → orchestrate; `{hello:true}` keeps chunk-0 smoke |
 

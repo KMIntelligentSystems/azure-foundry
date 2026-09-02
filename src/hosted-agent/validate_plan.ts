@@ -13,7 +13,6 @@ export interface PlanVerdict {
 }
 
 const MAX_STEPS = 5;
-const MAX_TASK_CHARS = 2_000;
 
 export function validatePlan(plan: Plan): PlanVerdict {
   const errors: string[] = [];
@@ -40,8 +39,8 @@ export function validatePlan(plan: Plan): PlanVerdict {
       errors.push(`step '${s.role}' targets '${s.deployment}' — not in the worker allowlist`);
       return false;
     }
-    if (!s.task || s.task.length > MAX_TASK_CHARS) {
-      errors.push(`step '${s.role}' task missing or over ${MAX_TASK_CHARS} chars`);
+    if (!s.task?.trim()) {
+      errors.push(`step '${s.role}' task is missing`);
       return false;
     }
     return true;
