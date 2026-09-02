@@ -91,8 +91,8 @@ gates pass: unknown_tool, catalog gate, path_escape, unpriced-deployment refusal
 
 | Module | Role |
 |---|---|
-| `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, 60s kill, `py -I` (Linux adds rlimits), stdout contract |
-| `agents/statistician.md` | defaultDeployment gpt-4.1, tools incl. execute_python |
+| `toolbox.ts` | `execute_python` tool: scrubbed env, cwd=workspace, asynchronous `python -I` child (so gateway heartbeats continue), configurable CPU/wall limits, ACA cgroup memory, stdout contract |
+| `agents/statistician.md` | defaultDeployment gpt-4.1-mini, tools incl. execute_python |
 | `Dockerfile.agent` | python3 + pinned numpy/pandas/statsmodels/scikit-learn (full-bookworm base) |
 | `validate_plan.ts` | partial rejection is non-fatal: surviving steps proceed, dropped steps reported as validationErrors |
 
@@ -119,8 +119,8 @@ package: a fresh `npm i playwright` needs `npx playwright install chromium`
 
 | Module | Role |
 |---|---|
-| `artifacts.ts` | workspace → classified manifest (chart/data/notes/other) + pending-tree render; the single seam for a future upload protocol |
-| planner/worker seats | `gpt-4.1-strong` alias: planner seat vs strong-worker seat WITHOUT doubling quota (validator sees distinct names; executor maps alias → real deployment) |
+| `artifacts.ts` | workspace → classified manifest (chart/data/notes/other), pending-file upload to artifact-service (not catalog publication), URL-bearing pending tree; generic turn failure returns this partial manifest |
+| planner/worker seats | `gpt-4.1` is planner-only; all worker roles, including statistician, use the deployed `gpt-4.1-mini` worker |
 | response contract | `OrchestratorResult.artifacts[]` + pending tree appended to finish text |
 
 **Proven** (`scripts/smoke-chunk6.ts`, the ADL flow in miniature, one conversation):

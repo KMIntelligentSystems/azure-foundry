@@ -169,11 +169,9 @@ backtest origin (see §6).
 
 ## 5. Models
 
-Budget classification is task-relative. A request explicitly limited to the
-naive floor plus one fixed ADL-OLS specification is `standard-analysis`; do not
-escalate it to `full-nowcast`. The complete comparison below (including LASSO,
-elastic net, and full walk-forward selection) is `full-nowcast`. Budget profiles
-are safety ceilings, never instructions to spend to the ceiling.
+Respect the model scope in the task. If the user requests only the naive floor
+plus one fixed ADL-OLS specification, do not add BIC, LASSO, or elastic net. The
+complete comparison below applies only when the full workflow is requested.
 
 1. **Naive floor:** `ĝ_t = g_{t−2}` (persistence of the last admissible
    YoY growth).
@@ -227,7 +225,12 @@ contribution chart.
 
 ## 9. Output contract
 
-Artifacts (orchestrator hand-off):
+Artifacts (orchestrator hand-off). For the full four-model workflow, write all
+six core outputs from the same successful Python computation before calling
+`finish`; the runtime rejects an incomplete output contract. Do not substitute
+round placeholder values, a prose-only summary, or an `adl_monthly_nowcast_summary.json`
+for these files. Chart coding starts only after these outputs and chart-feed
+JSON files exist.
 
 1. `analysis.md` — `text/markdown`, role `statistical-analysis`, per the
    statistician §4a contract. Caveats **must** surface the M3 SA freeze
@@ -242,8 +245,10 @@ Artifacts (orchestrator hand-off):
 5. `residuals.csv` — fitted residuals + walk-forward errors (role
    `dataset-csv`).
 6. `panel.csv` — the full modeling panel (role `dataset-csv`).
-7. Chart-feed JSON artifacts (role `dataset-meta`), one per gallery part,
-   each containing the named arrays the coder's briefs reference.
+7. Chart-feed JSON artifacts (role `dataset-meta`), one per gallery part:
+   `chart_feed_part_a.json`, `chart_feed_part_b.json`,
+   `chart_feed_part_c.json`, and `chart_feed_part_d.json`; each contains the
+   named arrays the coder's briefs reference.
 
 Print a compact JSON summary (point, PIs, metric table) to stdout at the
 end of the run.

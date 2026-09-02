@@ -100,7 +100,9 @@ export function App() {
 
 function FoundryApp() {
   const [prompt, setPrompt] = useState("");
-  const [conversationId, setConversationId] = useState("");
+  const [conversationId, setConversationId] = useState(() =>
+    localStorage.getItem("foundry-conversation-id") ?? `conv-${Date.now()}`,
+  );
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<OrchestratorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -127,7 +129,7 @@ function FoundryApp() {
   const [conversationUnread, setConversationUnread] = useState(0);
 
   useEffect(() => {
-    if (!conversationId) setConversationId(`conv-${Date.now()}`);
+    localStorage.setItem("foundry-conversation-id", conversationId);
   }, [conversationId]);
 
   useEffect(() => {
@@ -243,7 +245,9 @@ function FoundryApp() {
   };
 
   const handleNewConversation = () => {
-    setConversationId(`conv-${Date.now()}`);
+    const nextConversationId = `conv-${Date.now()}`;
+    localStorage.setItem("foundry-conversation-id", nextConversationId);
+    setConversationId(nextConversationId);
     setResult(null);
     setError(null);
     setPrompt("");
@@ -448,7 +452,27 @@ function FoundryApp() {
                         fontSize: "0.85rem",
                       }}
                     >
-                      <code>{a.path}</code> [{a.kind}] {a.bytes}B{a.valid ? " ✓" : ""}
+                      {a.url ? (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedArtifact({
+                            id: `pending-${conversationId}-${a.path}`,
+                            user_id: userId,
+                            category: "Pending",
+                            subject: conversationId,
+                            title: a.path,
+                            mime_type: a.mimeType,
+                            url: a.url!,
+                            created_at: new Date().toISOString(),
+                            tags: null,
+                          })}
+                          style={{ color: "#58a6ff", background: "none", border: 0, padding: 0, cursor: "pointer" }}
+                        >
+                          <code>{a.path}</code>
+                        </button>
+                      ) : (
+                        <code>{a.path}</code>
+                      )} [{a.kind}] {a.bytes}B{a.valid ? " ✓" : ""}
                     </li>
                   ))}
                 </ul>

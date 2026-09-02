@@ -9,8 +9,8 @@ React SWA --wss--> ACA gateway /ws/agent
                          |
                          +-- iterative planner
                          +-- hosted-agent agents + behavioral skills
-                         +-- execute_python(stage_indicator_panel)
-                         +-- trusted named budget profiles + shared turn ledger
+                         +-- async execute_python(stage_indicator_panel)
+                         +-- fixed runtime safety limits
                          +-- coder + Playwright
                          `-- final result on the same socket
 ```
@@ -35,9 +35,10 @@ introduced. Progress events and the final result travel over the same socket.
 }
 ```
 
-- Server messages: `ready`, repeated `agent_event`, then exactly one `result`
-  or `error`. Step events carry profile, step/turn estimated application cost,
-  model-call count, tool-execution count, and termination reason.
+- Server messages: `ready`, repeated `heartbeat`/`agent_event`, then exactly one
+  `result` or `error`. Step events carry model-call count, tool-execution count,
+  and termination reason. Ping + JSON heartbeat frames keep long turns live;
+  CPU-heavy Python must use an asynchronous child process so Node can emit them.
 - Configure `ALLOWED_ORIGINS` in ACA as a comma-separated exact list containing
   the production SWA origin.
 - Configure `ACA_GATEWAY_CLIENT_ID` and `ENTRA_TENANT_ID`; the first prompt
@@ -67,11 +68,14 @@ Vite connects to `ws://localhost:8080/ws/agent` by default in development.
    support, managed identity, and `minReplicas=1`, `maxReplicas=1` initially.
 3. Supply the Foundry project/model, artifact-service, origin, and identity
    environment configuration already used by the hosted-agent runtime. Optional
-   `BUDGET_PRICES_JSON` overrides the complete trusted per-1K-token price table;
-   malformed or missing deployment entries fail closed.
+   `PYTHON_TIMEOUT_MS` and `PYTHON_CPU_SECS` override scientific-run limits.
 4. Set `VITE_AGENT_WS_URL` in the SWA build and redeploy the frontend.
 5. Smoke a prompt-reference turn and verify a reader discovery round is
    followed by planner re-entry before statistician execution.
 
-Deployment is intentionally separate from this source change because Azure CLI
-and Azure Developer CLI environment verification must pass first.
+The browser persists the active `conversation_id` across reloads. Terminal
+artifact collection uploads pending files to artifact-service storage without
+publishing them into the catalog; the returned URLs are rendered through the
+in-app authenticated viewer. Generic failures still return a terminal partial
+result. If the user intentionally starts a new conversation, `import_run_file`
+can recover an explicitly named same-user prior-run file.

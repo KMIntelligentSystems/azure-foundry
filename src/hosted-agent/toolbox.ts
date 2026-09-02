@@ -26,7 +26,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { callLlm, type ToolSpec } from "./foundry.js";
 import type { Role } from "./imports.js";
 import { listSkills, readSkill } from "./skills.js";
@@ -55,6 +55,24 @@ function workspaceRoot(conversationId: string): string {
   const dir = path.join(base, safe);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+const WORKSPACE_OWNER_FILE = ".workspace-owner.json";
+
+function markWorkspaceOwner(ws: string, userId?: string): void {
+  if (!userId) return;
+  const marker = path.join(ws, WORKSPACE_OWNER_FILE);
+  if (!fs.existsSync(marker)) fs.writeFileSync(marker, JSON.stringify({ userId }));
+}
+
+function mayReadRunWorkspace(ws: string, userId?: string): boolean {
+  if (userId === "admin") return true;
+  try {
+    const owner = JSON.parse(fs.readFileSync(path.join(ws, WORKSPACE_OWNER_FILE), "utf8")) as { userId?: string };
+    return Boolean(userId && owner.userId === userId);
+  } catch {
+    return false;
+  }
 }
 
 function resolveInWorkspace(ws: string, rel: string): string | null {
@@ -261,15 +279,18 @@ async function readArtifactContent(args: Record<string, unknown>, userId: string
 // ── execute_python: the one spawn the runtime permits ──────────────────────
 //
 // Runs model-authored Python in a locked-down child (mirrors lockdown.rs):
-// scrubbed env, cwd = workspace, CPU rlimit on Linux, 60s kill. Memory is
-// bounded by the ACA container cgroup; RLIMIT_AS cannot be used because the
+// scrubbed env, cwd = workspace, configurable CPU/wall limits. Full expanding-
+// window ADL validation legitimately takes minutes; the defaults permit that
+// workload while ACA's container cgroup remains the memory boundary. RLIMIT_AS
+// cannot be used because the
 // scientific Python stack reserves more virtual address space than it commits.
 // stdout is the contract — results, prints, tracebacks all ride it back.
 
 const PYTHON_BIN = process.env["PYTHON_BIN"] ?? (process.platform === "win32" ? "py" : "python3");
-const PY_MAX_CHARS = 20_000;
+const PY_MAX_CHARS = 40_000;
 const PY_STDOUT_CAP = 30_000;
-const PY_TIMEOUT_MS = 60_000;
+const PY_TIMEOUT_MS = Number(process.env["PYTHON_TIMEOUT_MS"] ?? 900_000);
+const PY_CPU_SECS = Number(process.env["PYTHON_CPU_SECS"] ?? 840);
 
 interface PanelStageRequest {
   subject?: string | null;
@@ -377,18 +398,27 @@ async function runPython(
   }
   const ulimits =
     process.platform === "linux"
-      ? "import resource\nresource.setrlimit(resource.RLIMIT_CPU,(55,55))\n"
+      ? `import resource\nresource.setrlimit(resource.RLIMIT_CPU,(${PY_CPU_SECS},${PY_CPU_SECS}))\n`
       : "";
   const scriptPath = path.join(ws, `.exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.py`);
   fs.writeFileSync(scriptPath, ulimits + code);
   try {
-    const out = execFileSync(PYTHON_BIN, ["-I", scriptPath], {
-      cwd: ws,
-      env: scrubbed,
-      timeout: PY_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-      encoding: "utf8",
-      windowsHide: true,
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(PYTHON_BIN, ["-I", scriptPath], {
+        cwd: ws,
+        env: scrubbed,
+        timeout: PY_TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024,
+        encoding: "utf8",
+        windowsHide: true,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+        } else {
+          resolve(stdout);
+        }
+      });
     });
     return ok({
       ...(stagedInput ? { stagedInput } : {}),
@@ -396,7 +426,7 @@ async function runPython(
       truncated: out.length > PY_STDOUT_CAP,
     });
   } catch (e: any) {
-    if (e?.killed || e?.signal === "SIGTERM") return err("timeout_exceeded", "python run exceeded 60s");
+    if (e?.killed || e?.signal === "SIGTERM") return err("timeout_exceeded", `python run exceeded ${Math.round(PY_TIMEOUT_MS / 1000)}s`);
     const stderr = String(e?.stderr ?? "").slice(0, 4_000);
     const stdout = String(e?.stdout ?? "").slice(0, 4_000);
     return err("python_error", `${e?.message ?? "python failed"}\n${stderr}${stdout ? `\nstdout before error: ${stdout}` : ""}`);
@@ -583,6 +613,42 @@ const CATALOG: Record<string, ToolDef> = {
       return ok({ path: a["path"], content: fs.readFileSync(p, "utf8").slice(0, 50_000) });
     },
   },
+  import_run_file: {
+    spec: {
+      type: "function",
+      name: "import_run_file",
+      description: "Recover a file from a named prior conversation workspace into the current workspace. Use when the user supplies a prior conversation id or a /root/workspace/<conversation-id>/... path. Access is limited to the same user; admin may recover legacy workspaces without owner metadata.",
+      strict: true,
+      parameters: {
+        type: "object",
+        properties: {
+          conversation_id: { type: "string", description: "Prior conversation id, e.g. conv-1788301095598" },
+          path: { type: "string", description: "Workspace-relative path, e.g. charts/partA_m3_total_shipments_nsa.html" },
+        },
+        required: ["conversation_id", "path"],
+        additionalProperties: false,
+      },
+    },
+    run: (a, ws, ctx) => {
+      const sourceId = String(a["conversation_id"] ?? "");
+      const sourceRoot = workspaceRoot(sourceId);
+      if (!mayReadRunWorkspace(sourceRoot, ctx?.userId)) return err("forbidden", "prior workspace belongs to another user or lacks ownership metadata");
+      let rel = String(a["path"] ?? "").replace(/\\/g, "/");
+      const marker = `/workspace/${sourceId}/`;
+      const markerAt = rel.indexOf(marker);
+      if (markerAt >= 0) rel = rel.slice(markerAt + marker.length);
+      const source = resolveInWorkspace(sourceRoot, rel);
+      if (!source) return err("path_escape", "path resolves outside the prior workspace");
+      const fileError = workspaceFileError(source);
+      if (fileError) return fileError;
+      const importedRel = path.posix.join("imports", sourceId.replace(/[^A-Za-z0-9_-]/g, "_"), rel);
+      const target = resolveInWorkspace(ws, importedRel);
+      if (!target) return err("path_escape", "import target resolves outside the current workspace");
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target);
+      return ok({ sourceConversationId: sourceId, sourcePath: rel, importedPath: importedRel, bytes: fs.statSync(target).size });
+    },
+  },
   write_file: {
     spec: {
       type: "function",
@@ -617,8 +683,8 @@ const CATALOG: Record<string, ToolDef> = {
         "Run agent-authored Python 3 code in the conversation workspace (cwd). numpy/pandas/statsmodels/sklearn available. " +
         "For indicator-panel work, use stage_indicator_panel in THIS call: the runtime fetches raw refresh-panel observations " +
         "and writes them to the requested workspace path before Python starts. Raw observations are never returned to the LLM; " +
-        "Python must open the staged JSON and apply the selected SKILL.md itself. No network, scrubbed environment, 60s limit. " +
-        "Results come back via stdout; save durable outputs to workspace-relative paths.",
+        "Python must open the staged JSON and apply the selected SKILL.md itself. No network and a scrubbed environment. " +
+        `Results come back via stdout; save durable outputs to workspace-relative paths. Wall timeout: ${Math.round(PY_TIMEOUT_MS / 1000)} seconds.`,
       strict: true,
       parameters: {
         type: "object",
@@ -910,6 +976,24 @@ export interface RoleRunResult {
   terminatedBy: "finish" | "text" | "limit";
 }
 
+function requiredOutputErrors(role: Role, task: string, ws: string): string[] {
+  const isFullAdl = role.name === "statistician" &&
+    /adl-monthly-nowcast/i.test(task) &&
+    /LASSO-CV/i.test(task) &&
+    /elastic-net/i.test(task);
+  if (!isFullAdl) return [];
+  const required = [
+    "analysis.md", "model_card.json", "nowcast.csv",
+    "backtest.csv", "residuals.csv", "panel.csv",
+    "chart_feed_part_a.json", "chart_feed_part_b.json",
+    "chart_feed_part_c.json", "chart_feed_part_d.json",
+  ];
+  return required.filter((relative) => {
+    const full = path.join(ws, relative);
+    return !fs.existsSync(full) || !fs.statSync(full).isFile() || fs.statSync(full).size === 0;
+  }).map((relative) => `missing required ADL output: ${relative}`);
+}
+
 export async function runRole(
   role: Role,
   deployment: string,
@@ -921,6 +1005,7 @@ export async function runRole(
   modelCaller: typeof callLlm = callLlm,
 ): Promise<RoleRunResult> {
   const ws = workspaceRoot(conversationId);
+  markWorkspaceOwner(ws, ctx?.userId);
   const allowed = [...role.toolNames];
   const tools: ToolSpec[] = [
     ...allowed.map((n) => CATALOG[n].spec),
@@ -956,6 +1041,14 @@ export async function runRole(
     input.push(...res.rawOutput);
     const calls = res.functionCalls;
     if (calls.length === 0) {
+      const contractErrors = requiredOutputErrors(role, task, ws);
+      if (contractErrors.length > 0) {
+        input.push({
+          role: "user",
+          content: `You have not completed the required output contract: ${contractErrors.join("; ")}. Continue the computation and write every required file before finishing. Do not report placeholder values.`,
+        });
+        continue;
+      }
       output = res.text || "(empty response)";
       terminatedBy = "text";
       break;
@@ -963,6 +1056,15 @@ export async function runRole(
 
     for (const c of calls) {
       if (c.name === "finish") {
+        const contractErrors = requiredOutputErrors(role, task, ws);
+        if (contractErrors.length > 0) {
+          input.push({
+            type: "function_call_output",
+            call_id: c.callId,
+            output: JSON.stringify(err("output_contract_incomplete", contractErrors.join("; "))),
+          });
+          continue;
+        }
         output = String(c.args["output"] ?? "");
         terminatedBy = "finish";
         break;

@@ -160,7 +160,7 @@ export async function orchestrate(
       if (!verdict.plan.continuePlanning) {
         const completed = steps.every((step) => step.terminatedBy !== "limit");
         record(session, prompt, plans, steps, totals, completed);
-        const artifacts = collectArtifacts(id);
+        const artifacts = await collectArtifacts(id, userId);
         const response = formatResponse(plans, validationErrors, steps, artifacts);
         await emit(eventSink, { type: "agent_end", conversationId: id, ok: completed });
         return {
@@ -183,8 +183,20 @@ export async function orchestrate(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     record(session, prompt, plans, steps, totals, false);
+    const artifacts = await collectArtifacts(id, userId);
     await emit(eventSink, { type: "agent_error", conversationId: id, error: message });
-    throw error;
+    await emit(eventSink, { type: "agent_end", conversationId: id, ok: false });
+    return {
+      ok: false,
+      conversationId: id,
+      plan: aggregatePlan(plans),
+      plans,
+      ...(validationErrors.length ? { validationErrors } : {}),
+      steps,
+      artifacts,
+      response: `Turn failed after producing partial results: ${message}\n\n${formatResponse(plans, validationErrors, steps, artifacts)}`,
+      totals,
+    };
   }
 }
 

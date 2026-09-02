@@ -43,7 +43,7 @@ export interface OrchestratorResult {
   plan?: { rationale: string; steps: Array<{ role: string; task: string; deployment: string }> };
   plans?: Array<{ rationale: string; continuePlanning: boolean; steps: Array<{ role: string; task: string; deployment: string }> }>;
   steps?: Array<{ role: string; deployment: string; output: string; usage: { input: number; output: number }; round?: number; modelCalls: number; toolExecutions: number; terminatedBy: string }>;
-  artifacts?: Array<{ path: string; kind: string; bytes: number; valid?: boolean }>;
+  artifacts?: Array<{ path: string; kind: string; bytes: number; mimeType: string; url?: string; valid?: boolean }>;
   response: string;
   totals: { input: number; output: number };
 }

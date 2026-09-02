@@ -131,6 +131,20 @@ server.on("upgrade", (req, socket, head) => {
 
 sockets.on("connection", (socket) => {
   let working = false;
+  let alive = true;
+  socket.on("pong", () => { alive = true; });
+  const heartbeat = setInterval(() => {
+    if (!alive) {
+      socket.terminate();
+      return;
+    }
+    alive = false;
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.ping();
+      send(socket, { type: "heartbeat", at: new Date().toISOString(), working });
+    }
+  }, 25_000);
+  socket.on("close", () => clearInterval(heartbeat));
   send(socket, { type: "ready" });
 
   socket.on("message", async (bytes) => {
