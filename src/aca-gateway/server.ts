@@ -121,7 +121,9 @@ const sockets = new WebSocketServer({ noServer: true, maxPayload: 512 * 1024 });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  if (url.pathname !== "/ws/agent" || !allowedOrigin(req.headers.origin)) {
+  const origin = req.headers.origin;
+  if (url.pathname !== "/ws/agent" || !allowedOrigin(origin)) {
+    console.warn(`[aca-gateway] websocket upgrade rejected path=${url.pathname} origin=${origin ?? "(none)"}`);
     socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
     socket.destroy();
     return;
@@ -129,7 +131,10 @@ server.on("upgrade", (req, socket, head) => {
   sockets.handleUpgrade(req, socket, head, (ws) => sockets.emit("connection", ws, req));
 });
 
-sockets.on("connection", (socket) => {
+sockets.on("connection", (socket, request) => {
+  const origin = request.headers.origin ?? "(none)";
+  const forwardedFor = request.headers["x-forwarded-for"] ?? request.socket.remoteAddress ?? "(unknown)";
+  console.log(`[aca-gateway] websocket connected origin=${origin} forwardedFor=${forwardedFor}`);
   let working = false;
   let alive = true;
   socket.on("pong", () => { alive = true; });
@@ -144,7 +149,11 @@ sockets.on("connection", (socket) => {
       send(socket, { type: "heartbeat", at: new Date().toISOString(), working });
     }
   }, 25_000);
-  socket.on("close", () => clearInterval(heartbeat));
+  socket.on("close", (code, reason) => {
+    clearInterval(heartbeat);
+    console.log(`[aca-gateway] websocket closed code=${code} reason=${reason.toString() || "(none)"} working=${working}`);
+  });
+  socket.on("error", (error) => console.error(`[aca-gateway] websocket error: ${error.message}`));
   send(socket, { type: "ready" });
 
   socket.on("message", async (bytes) => {

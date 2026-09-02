@@ -39,6 +39,9 @@ introduced. Progress events and the final result travel over the same socket.
   `result` or `error`. Step events carry model-call count, tool-execution count,
   and termination reason. Ping + JSON heartbeat frames keep long turns live;
   CPU-heavy Python must use an asynchronous child process so Node can emit them.
+  The browser retries transient handshake failures up to three times, but only
+  before `ready` and prompt submission; post-submit disconnects are never retried.
+  Gateway logs record upgrade rejection, connection origin, and close code.
 - Configure `ALLOWED_ORIGINS` in ACA as a comma-separated exact list containing
   the production SWA origin.
 - Configure `ACA_GATEWAY_CLIENT_ID` and `ENTRA_TENANT_ID`; the first prompt
@@ -69,7 +72,10 @@ Vite connects to `ws://localhost:8080/ws/agent` by default in development.
 3. Supply the Foundry project/model, artifact-service, origin, and identity
    environment configuration already used by the hosted-agent runtime. Optional
    `PYTHON_TIMEOUT_MS` and `PYTHON_CPU_SECS` override scientific-run limits.
-4. Set `VITE_AGENT_WS_URL` in the SWA build and redeploy the frontend.
+4. Set `VITE_AGENT_WS_URL` in the SWA build and redeploy the frontend. The
+   canonical production SWA is `react_app` at
+   `https://icy-forest-04e89460f.7.azurestaticapps.net`; the separately created
+   `foundry-orchestrator-ui` resource is an empty Azure placeholder, not this app.
 5. Smoke a prompt-reference turn and verify a reader discovery round is
    followed by planner re-entry before statistician execution.
 

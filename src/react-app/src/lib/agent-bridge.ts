@@ -65,48 +65,91 @@ export function runSynchronousTurn(options: {
   onEvent: (event: AgentWireEvent) => void;
 }): Promise<OrchestratorResult> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(gatewayUrl());
+    const url = gatewayUrl();
+    const maxAttempts = 3;
+    let attempt = 0;
     let settled = false;
+    let socket: WebSocket | null = null;
+    let promptSent = false;
+    let connectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearConnectTimer = () => {
+      if (connectTimer) clearTimeout(connectTimer);
+      connectTimer = null;
+    };
 
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
-      socket.close();
+      clearConnectTimer();
+      socket?.close();
       reject(error);
     };
 
-    socket.onopen = () => {
-      socket.send(JSON.stringify({
-        type: "prompt",
-        conversation_id: options.conversationId,
-        promptText: options.promptText,
-        user_id: options.userId,
-        access_token: options.accessToken ?? null,
-      }));
-    };
-    socket.onmessage = (message) => {
-      let payload: { type: string; event?: AgentWireEvent; result?: OrchestratorResult; error?: string };
-      try {
-        payload = JSON.parse(String(message.data));
-      } catch {
-        fail(new Error("ACA gateway returned invalid JSON"));
-        return;
-      }
-      if (payload.type === "agent_event" && payload.event) {
-        options.onEvent(payload.event);
-      } else if (payload.type === "result" && payload.result) {
+    const promptMessage = JSON.stringify({
+      type: "prompt",
+      conversation_id: options.conversationId,
+      promptText: options.promptText,
+      user_id: options.userId,
+      access_token: options.accessToken ?? null,
+    });
+
+    const connect = () => {
+      if (settled) return;
+      attempt++;
+      promptSent = false;
+      let opened = false;
+      let socketError = false;
+      socket = new WebSocket(url);
+
+      connectTimer = setTimeout(() => {
+        if (settled || promptSent) return;
+        socket?.close();
+      }, 15_000);
+
+      socket.onopen = () => { opened = true; };
+      socket.onmessage = (message) => {
+        let payload: { type: string; event?: AgentWireEvent; result?: OrchestratorResult; error?: string };
+        try {
+          payload = JSON.parse(String(message.data));
+        } catch {
+          fail(new Error("ACA gateway returned invalid JSON"));
+          return;
+        }
+        if (payload.type === "ready" && !promptSent) {
+          clearConnectTimer();
+          promptSent = true;
+          socket?.send(promptMessage);
+        } else if (payload.type === "agent_event" && payload.event) {
+          options.onEvent(payload.event);
+        } else if (payload.type === "result" && payload.result) {
+          if (settled) return;
+          settled = true;
+          clearConnectTimer();
+          socket?.close();
+          resolve(payload.result);
+        } else if (payload.type === "error") {
+          fail(new Error(payload.error || "ACA gateway error"));
+        }
+        // heartbeat messages deliberately require no client action; browser
+        // WebSocket implementations answer protocol pings automatically.
+      };
+      socket.onerror = () => { socketError = true; };
+      socket.onclose = (event) => {
+        clearConnectTimer();
         if (settled) return;
-        settled = true;
-        socket.close();
-        resolve(payload.result);
-      } else if (payload.type === "error") {
-        fail(new Error(payload.error || "ACA gateway error"));
-      }
+        if (!promptSent && attempt < maxAttempts) {
+          setTimeout(connect, 750 * attempt);
+          return;
+        }
+        const detail = `attempts=${attempt}, opened=${opened}, sent=${promptSent}, close=${event.code}${event.reason ? ` (${event.reason})` : ""}, online=${navigator.onLine}, origin=${window.location.origin}, gateway=${url}`;
+        fail(new Error(promptSent
+          ? `ACA orchestrator connection closed before the turn completed (${detail})`
+          : `Unable to connect to the ACA orchestrator gateway (${detail}${socketError ? ", websocket-error=true" : ""})`));
+      };
     };
-    socket.onerror = () => fail(new Error("Unable to connect to the ACA orchestrator gateway"));
-    socket.onclose = () => {
-      if (!settled) fail(new Error("ACA orchestrator connection closed before the turn completed"));
-    };
+
+    connect();
   });
 }
 
