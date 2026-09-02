@@ -17,9 +17,10 @@ persistence verification, security, and browser event delivery.
    yet.
 2. **Sub-agent executor (current step).** Execute one validated delegation in
    an isolated workspace and return a summary plus artifact references.
-3. **Concurrent orchestration loop.** Replace `emit_plan` with iterative
-   orchestrator Responses calls; execute same-response delegates concurrently
-   with bounded per-deployment concurrency; return results to the orchestrator.
+3. **Concurrent orchestration loop (current step).** Add iterative orchestrator
+   Responses calls; execute same-response delegates concurrently with bounded
+   global/per-deployment concurrency; return results to the orchestrator. It
+   remains dormant until the live-switch step is explicitly reviewed.
 4. **Artifact handoff.** Register sub-agent outputs as pending artifacts and
    stage selected artifact IDs for later delegations without pasting large file
    contents into model context.
@@ -33,6 +34,31 @@ persistence verification, security, and browser event delivery.
 7. **UI and acceptance validation.** Display concurrent agents and individual
    artifacts, then validate end-to-end behavior against representative prompts
    including—but not hard-coded to—the ADL nowcast.
+
+## Step 3 contract
+
+`src/hosted-agent/dynamic-orchestrator.ts` implements the dormant dynamic model
+loop:
+
+- the Foundry orchestrator model receives only `delegate` and `finish` tools;
+- it authors every specialist task dynamically from the user request and prior
+  delegation evidence;
+- multiple delegate calls emitted in one response execute concurrently;
+- neutral semaphores bound global and per-deployment concurrency but do not
+  prescribe workflow shape;
+- `Promise.allSettled` preserves successful sibling results when one fails;
+- specialist summaries and artifact references return to the next model round
+  as correlated `function_call_output` items;
+- the model may delegate again after inspecting results or issue `finish` in a
+  later response;
+- invalid action batches execute no specialists;
+- repeated call IDs, excessive delegates per round, and non-terminating rounds
+  fail safely;
+- events expose orchestrator rounds plus delegation start/end activity.
+
+Step 3 does not replace the live `orchestrator.ts` entry point or deploy an ACA
+revision. The old planner/sequential runtime stays active until a later switch
+is reviewed.
 
 ## Step 2 contract
 

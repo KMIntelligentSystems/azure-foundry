@@ -3,13 +3,13 @@
 Minimal hand-rolled Foundry **hosted agent**: a container you package yourself,
 registered via the SDK, invoked over the Invocations protocol.
 
-> **Dynamic-orchestrator redesign:** Steps 1–2 are implemented but dormant.
+> **Dynamic-orchestrator redesign:** Steps 1–3 are implemented but dormant.
 > `orchestrator-protocol.ts` defines all-or-nothing validated `delegate` and
-> `finish` actions and permits multiple delegate calls in one model response.
-> `delegate-executor.ts` executes one validated delegation in an isolated
-> workspace and returns output artifact references with provenance. The live
-> runtime has not yet switched from the existing planner/executor. See
-> `design/dynamic-orchestrator-redesign.md`.
+> `finish` actions; `delegate-executor.ts` executes one action in an isolated
+> workspace; `dynamic-orchestrator.ts` lets the model delegate iteratively and
+> executes same-response delegates concurrently under neutral global and
+> per-deployment limits. The live runtime has not yet switched from the existing
+> planner/executor. See `design/dynamic-orchestrator-redesign.md`.
 
 ## Files
 

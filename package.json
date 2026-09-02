@@ -14,7 +14,8 @@
     "start:agent": "tsx src/hosted-agent/server.ts",
     "test:architecture": "tsx scripts/smoke-architecture.ts",
     "test:orchestrator-protocol": "tsx scripts/test-orchestrator-protocol.ts",
-    "test:delegate-executor": "tsx scripts/test-delegate-executor.ts"
+    "test:delegate-executor": "tsx scripts/test-delegate-executor.ts",
+    "test:dynamic-orchestrator": "tsx scripts/test-dynamic-orchestrator.ts"
   },
   "keywords": [
     "azure",
