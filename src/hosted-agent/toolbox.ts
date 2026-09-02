@@ -47,7 +47,7 @@ const err = (code: string, message: string): ToolResult => ({
 
 // ── Workspace ─────────────────────────────────────────────────────────────
 
-function workspaceRoot(conversationId: string): string {
+export function workspaceRoot(conversationId: string): string {
   const safe = conversationId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) || "anon";
   const base =
     process.env["WORKSPACE_ROOT"] ??

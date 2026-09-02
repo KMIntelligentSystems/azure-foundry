@@ -4,7 +4,7 @@ This project was built with the microsoft-foundry skill. Before working on or an
 
 ## Architecture invariants
 
-- The dynamic-orchestrator redesign is staged. Step 1 defines the dormant `delegate`/`finish` action protocol in `src/hosted-agent/orchestrator-protocol.ts`; the live runtime remains on the existing planner/executor until the executor and orchestration-loop steps are implemented and reviewed. The protocol permits multiple delegate calls per model response and validates each batch all-or-nothing; it does not encode a fixed workflow graph.
+- The dynamic-orchestrator redesign is staged. Step 1 defines the dormant `delegate`/`finish` action protocol in `src/hosted-agent/orchestrator-protocol.ts`; Step 2 defines the dormant single-delegation executor in `src/hosted-agent/delegate-executor.ts`. Each delegation stages only selected artifact IDs into an isolated `runId + callId` workspace and returns new/changed outputs with provenance. The live runtime remains on the existing planner/executor until the orchestration-loop step is implemented and reviewed. The protocol permits multiple delegate calls per model response and validates each batch all-or-nothing; it does not encode a fixed workflow graph.
 
 - `src/hosted-agent/agents/*.md` define the deployed application's stable role behavior and tool grants.
 - `src/hosted-agent/skills/*/SKILL.md` define the deployed application's behavioral methods. Skills are read and interpreted by agents; do not replace them with deterministic statistical pipelines.

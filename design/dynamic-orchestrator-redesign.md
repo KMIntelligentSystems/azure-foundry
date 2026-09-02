@@ -15,8 +15,8 @@ persistence verification, security, and browser event delivery.
    all-or-nothing validation of an orchestrator response. One response may
    contain multiple independent delegate calls. No execution behavior changes
    yet.
-2. **Sub-agent executor.** Execute one validated delegation in an isolated
-   workspace and return a summary plus artifact references.
+2. **Sub-agent executor (current step).** Execute one validated delegation in
+   an isolated workspace and return a summary plus artifact references.
 3. **Concurrent orchestration loop.** Replace `emit_plan` with iterative
    orchestrator Responses calls; execute same-response delegates concurrently
    with bounded per-deployment concurrency; return results to the orchestrator.
@@ -33,6 +33,32 @@ persistence verification, security, and browser event delivery.
 7. **UI and acceptance validation.** Display concurrent agents and individual
    artifacts, then validate end-to-end behavior against representative prompts
    including—but not hard-coded to—the ADL nowcast.
+
+## Step 2 contract
+
+`src/hosted-agent/delegate-executor.ts` executes one already validated
+`DelegateAction`. It deliberately has no orchestration-round or concurrency
+logic; Step 3 will decide which actions run together.
+
+For each delegation it:
+
+- derives an isolated workspace from `runId + delegate callId`;
+- resolves the requested specialist role and real deployment;
+- stages only explicitly selected artifact IDs through an injected stager;
+- rejects missing, unexpected, duplicate, or outside-workspace staged inputs;
+- runs the existing role tool loop inside that isolated workspace;
+- fingerprints files before and after execution;
+- returns only new/changed output files as typed pending artifact references;
+- attaches run, call, agent, and workspace provenance to every artifact;
+- returns structured failure state and any partial outputs when staging or the
+  specialist run fails.
+
+The artifact stager is dependency-injected in Step 2. Step 4 will connect it to
+the pending artifact registry and catalog. Input file contents never enter the
+orchestrator context.
+
+Step 2 remains dormant: the live planner/sequential orchestrator does not call
+`executeDelegation` yet.
 
 ## Step 1 contract
 
