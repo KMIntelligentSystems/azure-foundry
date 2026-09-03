@@ -8,8 +8,10 @@
 import http from "node:http";
 import { createPublicKey, verify as verifySignature } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
-import { orchestrate } from "../hosted-agent/orchestrator.js";
-import type { AgentEvent } from "../hosted-agent/events.js";
+import {
+  runDynamicOrchestrator,
+  type DynamicOrchestratorEvent,
+} from "../hosted-agent/dynamic-orchestrator.js";
 
 const PORT = Number(process.env["PORT"] ?? 8080);
 const ALLOWED_ORIGINS = (process.env["ALLOWED_ORIGINS"] ?? "")
@@ -176,12 +178,105 @@ sockets.on("connection", (socket, request) => {
     working = true;
     try {
       const user = await authenticate(message);
-      const result = await orchestrate(
-        message.promptText,
-        message.conversation_id,
-        user.id,
-        (event: AgentEvent) => send(socket, { type: "agent_event", event }),
-      );
+      const conversationId = message.conversation_id?.trim() || `conv-${Date.now()}`;
+      const runId = `${conversationId}-${Date.now()}`;
+      const eventSink = (event: DynamicOrchestratorEvent) => {
+        switch (event.type) {
+          case "orchestrator_start":
+            send(socket, { type: "agent_event", event: { type: "agent_start", conversationId, prompt: message.promptText } });
+            break;
+          case "orchestrator_round_start":
+            send(socket, { type: "agent_event", event: { type: "planning_start", conversationId, round: event.round ?? 1 } });
+            break;
+          case "orchestrator_actions": {
+            const delegates = (event.actions ?? []).filter((action) => action.type === "delegate");
+            if (delegates.length > 0) {
+              send(socket, {
+                type: "agent_event",
+                event: {
+                  type: "plan",
+                  conversationId,
+                  round: event.round ?? 1,
+                  rationale: `Dynamic orchestrator delegated ${delegates.length} specialist task(s).`,
+                  continuePlanning: true,
+                  steps: delegates.map((action) => ({
+                    role: action.type === "delegate" ? action.agent : "",
+                    task: action.type === "delegate" ? action.task : "",
+                    deployment: action.type === "delegate" ? action.deployment : "",
+                  })),
+                },
+              });
+            }
+            break;
+          }
+          case "delegation_start":
+            if (event.action) {
+              send(socket, {
+                type: "agent_event",
+                event: {
+                  type: "step_start",
+                  conversationId,
+                  round: event.round ?? 1,
+                  index: 0,
+                  role: event.action.agent,
+                  deployment: event.action.deployment,
+                  task: event.action.task,
+                },
+              });
+            }
+            break;
+          case "delegation_end":
+            if (event.result) {
+              send(socket, {
+                type: "agent_event",
+                event: {
+                  type: "step_end",
+                  conversationId,
+                  round: event.round ?? 1,
+                  index: 0,
+                  role: event.result.agent,
+                  deployment: event.result.deployment,
+                  output: event.result.summary,
+                  usage: event.result.usage,
+                  modelCalls: event.result.modelCalls,
+                  toolExecutions: event.result.toolExecutions,
+                  terminatedBy: event.result.status === "succeeded" ? "finish" : "limit",
+                },
+              });
+            }
+            break;
+          case "orchestrator_error":
+            send(socket, { type: "agent_event", event: { type: "agent_error", conversationId, error: event.error ?? "dynamic orchestrator failed" } });
+            break;
+        }
+      };
+      const dynamic = await runDynamicOrchestrator(message.promptText, {
+        runId,
+        userId: user.id,
+        eventSink,
+      });
+      const result = {
+        ok: dynamic.ok,
+        conversationId,
+        response: dynamic.response,
+        steps: dynamic.delegations.map((item) => ({
+          role: item.agent,
+          deployment: item.deployment,
+          output: item.summary,
+          usage: item.usage,
+          modelCalls: item.modelCalls,
+          toolExecutions: item.toolExecutions,
+          terminatedBy: item.status === "succeeded" ? "finish" : "limit",
+        })),
+        artifacts: dynamic.artifacts.map((artifact) => ({
+          path: artifact.path,
+          kind: artifact.kind,
+          bytes: artifact.bytes,
+          mimeType: artifact.mimeType,
+        })),
+        totals: dynamic.usage,
+      };
+      send(socket, { type: "agent_event", event: { type: "agent_end", conversationId, ok: dynamic.ok } });
       send(socket, { type: "result", result });
     } catch (error) {
       send(socket, { type: "error", error: error instanceof Error ? error.message : String(error) });
