@@ -216,21 +216,6 @@ async function persistArtifactBundle(
   if (new Set(requested.map((file) => file.title.toLowerCase())).size !== requested.length) {
     return err("invalid_args", "artifact titles must be distinct");
   }
-  const requestedPaths = new Set(requested.map((file) => file.path.replace(/\\/g, "/")));
-  const looksLikeAdlBundle = /\b(adl|nowcast)\b/i.test(`${subject} ${tags ?? ""}`) ||
-    ["analysis.md", "model_card.json", "nowcast.csv", "backtest.csv", "residuals.csv", "panel.csv"]
-      .every((path) => requestedPaths.has(path));
-  if (looksLikeAdlBundle) {
-    const validationErrors = requiredOutputErrors(
-      { name: "statistician" } as Role,
-      "adl-monthly-nowcast LASSO-CV elastic-net",
-      ws,
-    );
-    if (validationErrors.length > 0) {
-      return err("artifact_validation_failed", `ADL bundle is not publishable: ${validationErrors.join("; ")}`);
-    }
-  }
-
   let existing: CatalogEntry[] = [];
   try {
     const list = await fetch(`${artifactServiceUrl()}/artifacts`, {

@@ -45,6 +45,7 @@ export interface DelegationResult {
   usage: { input: number; output: number };
   modelCalls: number;
   toolExecutions: number;
+  catalogUpdated: boolean;
   inputArtifacts: StagedDelegationInput[];
   artifacts: DelegationArtifactRef[];
   error?: string;
@@ -213,6 +214,7 @@ export async function executeDelegation(
       usage: run.usage,
       modelCalls: run.modelCalls,
       toolExecutions: run.toolExecutions,
+      catalogUpdated: run.catalogUpdated,
       inputArtifacts: stagedInputs,
       artifacts: refs,
       ...(!succeeded ? { error: run.output } : {}),
@@ -244,6 +246,7 @@ export async function executeDelegation(
       usage: { input: 0, output: 0 },
       modelCalls: 0,
       toolExecutions: 0,
+      catalogUpdated: false,
       inputArtifacts: stagedInputs,
       artifacts: refs,
       error: message,

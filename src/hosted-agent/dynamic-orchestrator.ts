@@ -129,6 +129,27 @@ const DEFAULT_MAX_DELEGATES_PER_ROUND = 12;
 const DEFAULT_GLOBAL_CONCURRENCY = 3;
 const DEFAULT_PER_DEPLOYMENT_CONCURRENCY = 2;
 const MAX_SUMMARY_CHARS = 6_000;
+const SHARED_GLOBAL_SEMAPHORES = new Map<number, Semaphore>();
+const SHARED_DEPLOYMENT_SEMAPHORES = new Map<string, Semaphore>();
+
+function sharedGlobalSemaphore(capacity: number): Semaphore {
+  let semaphore = SHARED_GLOBAL_SEMAPHORES.get(capacity);
+  if (!semaphore) {
+    semaphore = new Semaphore(capacity);
+    SHARED_GLOBAL_SEMAPHORES.set(capacity, semaphore);
+  }
+  return semaphore;
+}
+
+function sharedDeploymentSemaphore(deployment: string, capacity: number): Semaphore {
+  const key = `${deployment}:${capacity}`;
+  let semaphore = SHARED_DEPLOYMENT_SEMAPHORES.get(key);
+  if (!semaphore) {
+    semaphore = new Semaphore(capacity);
+    SHARED_DEPLOYMENT_SEMAPHORES.set(key, semaphore);
+  }
+  return semaphore;
+}
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const resolved = value ?? fallback;
@@ -212,6 +233,7 @@ function failedDelegation(runId: string, action: DelegateAction, error: unknown)
     usage: { input: 0, output: 0 },
     modelCalls: 0,
     toolExecutions: 0,
+    catalogUpdated: false,
     inputArtifacts: [],
     artifacts: [],
     error: message,
@@ -247,16 +269,8 @@ export async function executeDelegationBatch(
     DEFAULT_PER_DEPLOYMENT_CONCURRENCY,
     "perDeploymentConcurrency",
   );
-  const globalSemaphore = new Semaphore(globalLimit);
-  const deploymentSemaphores = new Map<string, Semaphore>();
-  const forDeployment = (deployment: string) => {
-    let semaphore = deploymentSemaphores.get(deployment);
-    if (!semaphore) {
-      semaphore = new Semaphore(deploymentLimit);
-      deploymentSemaphores.set(deployment, semaphore);
-    }
-    return semaphore;
-  };
+  const globalSemaphore = sharedGlobalSemaphore(globalLimit);
+  const forDeployment = (deployment: string) => sharedDeploymentSemaphore(deployment, deploymentLimit);
 
   const settled = await Promise.allSettled(actions.map((action) =>
     forDeployment(action.deployment).use(() => globalSemaphore.use(async () => {
@@ -306,11 +320,28 @@ export async function runDynamicOrchestrator(
   const registry = dependencies.pendingRegistryFactory?.(runId) ?? new PendingArtifactRegistry(runId);
   const stageArtifacts = options.stageArtifacts ?? registry.stageArtifacts;
   const instructions = dynamicOrchestratorInstructions(roles, workerDeployments);
-  const input: unknown[] = [{ role: "user", content: userPrompt }];
+  const available = registry.list();
+  const pendingContext = available.length === 0
+    ? ""
+    : `\n\nPENDING ARTIFACTS AVAILABLE FROM EARLIER TURNS IN THIS CONVERSATION:\n${available.map((artifact) => `- ${artifact.id}: ${artifact.title} [${artifact.mimeType}, ${artifact.bytes} bytes]`).join("\n")}\nFor a save/catalogue follow-up, delegate the operator with the selected pending IDs. If no pending IDs are available, finish immediately with a clear explanation.`;
+  const input: unknown[] = [{ role: "user", content: `${userPrompt}${pendingContext}` }];
+  const saveRequest = /\b(save|persist|catalog(?:ue)?|artifacts?\s*db|documents)\b/i.test(userPrompt);
+  if (saveRequest && available.length === 0) {
+    return {
+      ok: false,
+      runId,
+      response: "No pending artifacts are available in this conversation to save.",
+      rounds: [], delegations: [], artifacts: [], pendingArtifacts: [],
+      usage: { input: 0, output: 0 },
+      error: "No pending artifacts are available in this conversation to save.",
+    };
+  }
   const rounds: DynamicOrchestratorRound[] = [];
   const allDelegations: DelegationResult[] = [];
   const usage = { input: 0, output: 0 };
   const seenCallIds = new Set<string>();
+  let lastNoProgressSignature = "";
+  let noProgressRepeats = 0;
 
   await emit(options.eventSink, { type: "orchestrator_start", runId });
 
@@ -374,7 +405,24 @@ export async function runDynamicOrchestrator(
         stageArtifacts,
         eventSink: options.eventSink,
       }, runner);
-      registry.register(results.flatMap((result) => result.artifacts));
+      const registered = registry.register(results.flatMap((result) => result.artifacts));
+      const signature = JSON.stringify(delegates.map((action) => ({
+        agent: action.agent,
+        deployment: action.deployment,
+        task: action.task.trim().replace(/\s+/g, " "),
+        inputArtifactIds: [...action.inputArtifactIds].sort(),
+      })));
+      const verifiedPersistence = results.some((result) => result.catalogUpdated);
+      if (saveRequest && delegates.some((action) => action.agent === "operator") && !verifiedPersistence) {
+        throw new Error("artifact persistence failed: operator returned no verified catalog update");
+      }
+      const madeProgress = saveRequest ? verifiedPersistence : registered.length > 0 || verifiedPersistence;
+      if (!madeProgress && signature === lastNoProgressSignature) noProgressRepeats++;
+      else noProgressRepeats = madeProgress ? 0 : 1;
+      lastNoProgressSignature = signature;
+      if (noProgressRepeats >= 2) {
+        throw new Error("orchestrator stopped: repeated delegation batch produced no new artifacts or verified side effects");
+      }
       allDelegations.push(...results);
       rounds.push({ round, actions: verdict.actions, delegations: results, usage: response.usage });
       for (let index = 0; index < delegates.length; index++) {

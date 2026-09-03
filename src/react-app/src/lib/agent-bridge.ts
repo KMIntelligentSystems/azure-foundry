@@ -44,7 +44,7 @@ export interface OrchestratorResult {
   plan?: { rationale: string; steps: Array<{ role: string; task: string; deployment: string }> };
   plans?: Array<{ rationale: string; continuePlanning: boolean; steps: Array<{ role: string; task: string; deployment: string }> }>;
   steps?: Array<{ role: string; deployment: string; output: string; usage: { input: number; output: number }; round?: number; modelCalls: number; toolExecutions: number; terminatedBy: string }>;
-  artifacts?: Array<{ path: string; kind: string; bytes: number; mimeType: string; url?: string; valid?: boolean }>;
+  artifacts?: Array<{ id: string; runId: string; agent: string; callId: string; path: string; kind: string; bytes: number; mimeType: string; url?: string; valid?: boolean }>;
   response: string;
   totals: { input: number; output: number };
 }
@@ -72,6 +72,8 @@ export function runSynchronousTurn(options: {
     let settled = false;
     let socket: WebSocket | null = null;
     let promptSent = false;
+    let resumeMode = false;
+    let receivedMessages = 0;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const clearConnectTimer = () => {
@@ -87,7 +89,13 @@ export function runSynchronousTurn(options: {
       reject(error);
     };
 
-    const promptMessage = JSON.stringify({
+    const promptMessage = () => JSON.stringify(resumeMode ? {
+      type: "resume",
+      conversation_id: options.conversationId,
+      after_event: receivedMessages,
+      user_id: options.userId,
+      access_token: options.accessToken ?? null,
+    } : {
       type: "prompt",
       conversation_id: options.conversationId,
       promptText: options.promptText,
@@ -120,10 +128,12 @@ export function runSynchronousTurn(options: {
         if (payload.type === "ready" && !promptSent) {
           clearConnectTimer();
           promptSent = true;
-          socket?.send(promptMessage);
+          socket?.send(promptMessage());
         } else if (payload.type === "agent_event" && payload.event) {
+          receivedMessages++;
           options.onEvent(payload.event);
         } else if (payload.type === "result" && payload.result) {
+          receivedMessages++;
           if (settled) return;
           settled = true;
           clearConnectTimer();
@@ -139,7 +149,8 @@ export function runSynchronousTurn(options: {
       socket.onclose = (event) => {
         clearConnectTimer();
         if (settled) return;
-        if (!promptSent && attempt < maxAttempts) {
+        if (attempt < maxAttempts) {
+          if (promptSent) resumeMode = true;
           setTimeout(connect, 750 * attempt);
           return;
         }

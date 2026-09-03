@@ -30,6 +30,16 @@ interface PromptMessage {
   access_token?: string;
 }
 
+interface ResumeMessage {
+  type: "resume";
+  conversation_id: string;
+  after_event?: number;
+  user_id?: string;
+  access_token?: string;
+}
+
+type ClientMessage = PromptMessage | ResumeMessage;
+
 interface AuthenticatedUser {
   id: string;
   claims: Record<string, unknown>;
@@ -63,7 +73,7 @@ async function signingKeys(): Promise<Jwk[]> {
   return jwksCache.keys;
 }
 
-async function authenticate(message: PromptMessage): Promise<AuthenticatedUser> {
+async function authenticate(message: Pick<PromptMessage, "user_id" | "access_token">): Promise<AuthenticatedUser> {
   if (ALLOW_INSECURE_USER_ID) {
     const id = String(message.user_id ?? "").trim().toLowerCase();
     if (!id) throw new Error("user_id is required in insecure local mode");
@@ -111,6 +121,75 @@ function send(socket: WebSocket, payload: unknown): void {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
 }
 
+interface ActiveTurn {
+  conversationId: string;
+  userId: string;
+  promptText: string;
+  subscribers: Set<WebSocket>;
+  messages: unknown[];
+  completed: boolean;
+}
+
+const activeTurns = new Map<string, ActiveTurn>();
+
+function publish(turn: ActiveTurn, payload: unknown): void {
+  turn.messages.push(payload);
+  for (const subscriber of turn.subscribers) send(subscriber, payload);
+}
+
+function dynamicWireEvent(turn: ActiveTurn, event: DynamicOrchestratorEvent): void {
+  const conversationId = turn.conversationId;
+  switch (event.type) {
+    case "orchestrator_start":
+      publish(turn, { type: "agent_event", event: { type: "agent_start", conversationId, prompt: turn.promptText } });
+      break;
+    case "orchestrator_round_start":
+      publish(turn, { type: "agent_event", event: { type: "planning_start", conversationId, round: event.round ?? 1 } });
+      break;
+    case "orchestrator_actions": {
+      const delegates = (event.actions ?? []).filter((action) => action.type === "delegate");
+      if (delegates.length > 0) {
+        publish(turn, {
+          type: "agent_event",
+          event: {
+            type: "plan", conversationId, round: event.round ?? 1,
+            rationale: `Dynamic orchestrator delegated ${delegates.length} specialist task(s).`,
+            continuePlanning: true,
+            steps: delegates.map((action) => ({
+              role: action.type === "delegate" ? action.agent : "",
+              task: action.type === "delegate" ? action.task : "",
+              deployment: action.type === "delegate" ? action.deployment : "",
+            })),
+          },
+        });
+      }
+      break;
+    }
+    case "delegation_start":
+      if (event.action) {
+        publish(turn, { type: "agent_event", event: {
+          type: "step_start", conversationId, round: event.round ?? 1, index: 0,
+          role: event.action.agent, deployment: event.action.deployment, task: event.action.task,
+        } });
+      }
+      break;
+    case "delegation_end":
+      if (event.result) {
+        publish(turn, { type: "agent_event", event: {
+          type: "step_end", conversationId, round: event.round ?? 1, index: 0,
+          role: event.result.agent, deployment: event.result.deployment,
+          output: event.result.summary, usage: event.result.usage,
+          modelCalls: event.result.modelCalls, toolExecutions: event.result.toolExecutions,
+          terminatedBy: event.result.status === "succeeded" ? "finish" : "limit",
+        } });
+      }
+      break;
+    case "orchestrator_error":
+      publish(turn, { type: "agent_event", event: { type: "agent_error", conversationId, error: event.error ?? "dynamic orchestrator failed" } });
+      break;
+  }
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/readiness") {
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
@@ -153,17 +232,35 @@ sockets.on("connection", (socket, request) => {
   }, 25_000);
   socket.on("close", (code, reason) => {
     clearInterval(heartbeat);
+    for (const turn of activeTurns.values()) turn.subscribers.delete(socket);
     console.log(`[aca-gateway] websocket closed code=${code} reason=${reason.toString() || "(none)"} working=${working}`);
   });
   socket.on("error", (error) => console.error(`[aca-gateway] websocket error: ${error.message}`));
   send(socket, { type: "ready" });
 
   socket.on("message", async (bytes) => {
-    let message: PromptMessage;
+    let message: ClientMessage;
     try {
-      message = JSON.parse(bytes.toString()) as PromptMessage;
+      message = JSON.parse(bytes.toString()) as ClientMessage;
     } catch {
       send(socket, { type: "error", error: "invalid JSON" });
+      return;
+    }
+    if (message.type === "resume") {
+      try {
+        const user = await authenticate(message);
+        const turn = activeTurns.get(message.conversation_id);
+        if (!turn) throw new Error("active turn not found; submit a new prompt");
+        if (turn.userId !== user.id) throw new Error("active conversation belongs to another user");
+        turn.subscribers.add(socket);
+        working = !turn.completed;
+        const after = Number.isInteger(message.after_event) && Number(message.after_event) >= 0
+          ? Number(message.after_event)
+          : 0;
+        for (const payload of turn.messages.slice(after)) send(socket, payload);
+      } catch (error) {
+        send(socket, { type: "error", error: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
     if (message.type !== "prompt" || !message.promptText?.trim()) {
@@ -179,105 +276,59 @@ sockets.on("connection", (socket, request) => {
     try {
       const user = await authenticate(message);
       const conversationId = message.conversation_id?.trim() || `conv-${Date.now()}`;
-      const runId = `${conversationId}-${Date.now()}`;
-      const eventSink = (event: DynamicOrchestratorEvent) => {
-        switch (event.type) {
-          case "orchestrator_start":
-            send(socket, { type: "agent_event", event: { type: "agent_start", conversationId, prompt: message.promptText } });
-            break;
-          case "orchestrator_round_start":
-            send(socket, { type: "agent_event", event: { type: "planning_start", conversationId, round: event.round ?? 1 } });
-            break;
-          case "orchestrator_actions": {
-            const delegates = (event.actions ?? []).filter((action) => action.type === "delegate");
-            if (delegates.length > 0) {
-              send(socket, {
-                type: "agent_event",
-                event: {
-                  type: "plan",
-                  conversationId,
-                  round: event.round ?? 1,
-                  rationale: `Dynamic orchestrator delegated ${delegates.length} specialist task(s).`,
-                  continuePlanning: true,
-                  steps: delegates.map((action) => ({
-                    role: action.type === "delegate" ? action.agent : "",
-                    task: action.type === "delegate" ? action.task : "",
-                    deployment: action.type === "delegate" ? action.deployment : "",
-                  })),
-                },
-              });
-            }
-            break;
-          }
-          case "delegation_start":
-            if (event.action) {
-              send(socket, {
-                type: "agent_event",
-                event: {
-                  type: "step_start",
-                  conversationId,
-                  round: event.round ?? 1,
-                  index: 0,
-                  role: event.action.agent,
-                  deployment: event.action.deployment,
-                  task: event.action.task,
-                },
-              });
-            }
-            break;
-          case "delegation_end":
-            if (event.result) {
-              send(socket, {
-                type: "agent_event",
-                event: {
-                  type: "step_end",
-                  conversationId,
-                  round: event.round ?? 1,
-                  index: 0,
-                  role: event.result.agent,
-                  deployment: event.result.deployment,
-                  output: event.result.summary,
-                  usage: event.result.usage,
-                  modelCalls: event.result.modelCalls,
-                  toolExecutions: event.result.toolExecutions,
-                  terminatedBy: event.result.status === "succeeded" ? "finish" : "limit",
-                },
-              });
-            }
-            break;
-          case "orchestrator_error":
-            send(socket, { type: "agent_event", event: { type: "agent_error", conversationId, error: event.error ?? "dynamic orchestrator failed" } });
-            break;
-        }
+      const existing = activeTurns.get(conversationId);
+      if (existing && !existing.completed) {
+        if (existing.userId !== user.id) throw new Error("active conversation belongs to another user");
+        existing.subscribers.add(socket);
+        for (const payload of existing.messages) send(socket, payload);
+        return;
+      }
+
+      const turn: ActiveTurn = {
+        conversationId,
+        userId: user.id,
+        promptText: message.promptText,
+        subscribers: new Set([socket]),
+        messages: [],
+        completed: false,
       };
-      const dynamic = await runDynamicOrchestrator(message.promptText, {
+      activeTurns.set(conversationId, turn);
+      const runId = conversationId; // conversation owns pending artifacts across follow-up turns
+      void runDynamicOrchestrator(message.promptText, {
         runId,
         userId: user.id,
-        eventSink,
+        eventSink: (event) => dynamicWireEvent(turn, event),
+      }).then((dynamic) => {
+        const result = {
+          ok: dynamic.ok,
+          conversationId,
+          runId,
+          response: dynamic.response,
+          steps: dynamic.delegations.map((item) => ({
+            role: item.agent, deployment: item.deployment, output: item.summary,
+            usage: item.usage, modelCalls: item.modelCalls,
+            toolExecutions: item.toolExecutions,
+            terminatedBy: item.status === "succeeded" ? "finish" : "limit",
+          })),
+          artifacts: dynamic.artifacts.map((artifact) => ({
+            id: artifact.id,
+            runId: artifact.runId,
+            agent: artifact.agent,
+            callId: artifact.callId,
+            path: artifact.path,
+            kind: artifact.kind,
+            bytes: artifact.bytes,
+            mimeType: artifact.mimeType,
+          })),
+          totals: dynamic.usage,
+        };
+        publish(turn, { type: "agent_event", event: { type: "agent_end", conversationId, ok: dynamic.ok } });
+        publish(turn, { type: "result", result });
+        turn.completed = true;
+      }).catch((error) => {
+        publish(turn, { type: "error", error: error instanceof Error ? error.message : String(error) });
+        turn.completed = true;
       });
-      const result = {
-        ok: dynamic.ok,
-        conversationId,
-        response: dynamic.response,
-        steps: dynamic.delegations.map((item) => ({
-          role: item.agent,
-          deployment: item.deployment,
-          output: item.summary,
-          usage: item.usage,
-          modelCalls: item.modelCalls,
-          toolExecutions: item.toolExecutions,
-          terminatedBy: item.status === "succeeded" ? "finish" : "limit",
-        })),
-        artifacts: dynamic.artifacts.map((artifact) => ({
-          path: artifact.path,
-          kind: artifact.kind,
-          bytes: artifact.bytes,
-          mimeType: artifact.mimeType,
-        })),
-        totals: dynamic.usage,
-      };
-      send(socket, { type: "agent_event", event: { type: "agent_end", conversationId, ok: dynamic.ok } });
-      send(socket, { type: "result", result });
     } catch (error) {
       send(socket, { type: "error", error: error instanceof Error ? error.message : String(error) });
     } finally {
