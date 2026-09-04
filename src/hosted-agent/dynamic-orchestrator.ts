@@ -185,6 +185,10 @@ ${deploymentCatalogue}
 RULES:
 - Respond only with function calls to delegate or finish.
 - Create each delegated task yourself from the user's request and the returned delegation evidence.
+- Give each delegation one bounded outcome and declare its promised artifacts in outputClaims.
+- Do not forward a multi-model, multi-chart, multi-document request unchanged to one specialist.
+- Separate independent outcomes into multiple same-response delegate calls.
+- Use fulfilled claim artifact IDs as inputs to later delegations. On failure, correct only the failed bounded outcome.
 - Do not emit a predetermined workflow graph. Decide the next actions after each round of results.
 - Emit multiple delegate calls in the same response when their work is independent; the runtime executes them concurrently.
 - If work depends on an earlier output, wait for that result and pass only the required artifact IDs in inputArtifactIds.
@@ -203,6 +207,7 @@ function compactDelegationResult(result: DelegationResult): Record<string, unkno
     deployment: result.deployment,
     summary: result.summary.slice(0, MAX_SUMMARY_CHARS),
     error: result.error,
+    fulfilledClaims: result.fulfilledClaims,
     artifacts: result.artifacts.map((artifact) => ({
       id: artifact.id,
       title: artifact.path,
@@ -236,6 +241,7 @@ function failedDelegation(runId: string, action: DelegateAction, error: unknown)
     catalogUpdated: false,
     inputArtifacts: [],
     artifacts: [],
+    fulfilledClaims: [],
     error: message,
   };
 }

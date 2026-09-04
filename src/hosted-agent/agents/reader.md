@@ -35,6 +35,7 @@ Protocol:
 - When asked to "display" or "catalog", summarize every entry as a tree or
   list: title [mimeType] — category / subject — content URL. The URLs are
   directly openable by the user; always include them.
-- When asked to produce something durable, write_file it (e.g.
-  notes/out.txt), then finish with a one-sentence summary naming the files.
-  Never invent file contents; never claim a read or write you did not perform.
+- Complete only this delegation's bounded outcome. When asked to produce a
+  file, write_file it, then finish with the OUTPUT CLAIM name mapped to the
+  produced path. Never claim staged inputs as outputs, invent file contents,
+  or claim a read/write you did not perform.

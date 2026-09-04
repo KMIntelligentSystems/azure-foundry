@@ -4,7 +4,7 @@ This project was built with the microsoft-foundry skill. Before working on or an
 
 ## Architecture invariants
 
-- The dynamic-orchestrator redesign is staged. Steps 1–4 are implemented but dormant: `orchestrator-protocol.ts` defines validated `delegate`/`finish` actions; `delegate-executor.ts` runs one specialist in an isolated workspace; `dynamic-orchestrator.ts` iterates and concurrently executes same-response delegations; `pending-artifact-registry.ts` registers hashed, run-scoped pending IDs and stages selected files into downstream isolated workspaces. The live runtime remains on the existing planner/executor until a later switch step is explicitly reviewed. Step 5 is durable run/event state and reconnect, corresponding to original redesign item 7.
+- Dynamic delegations use model-authored, delegation-specific OUTPUT CLAIMS. Each bounded delegation declares semantic output names, MIME types, descriptions, and minimum counts; the specialist maps only files produced by that delegation to those claims in finish(). The runtime validates that generic contract and returns claim-to-pending-ID mappings. Do not restore task-wording-based whole-ADL or fixed-gallery completion gates.
 
 - `src/hosted-agent/agents/*.md` define the deployed application's stable role behavior and tool grants.
 - `src/hosted-agent/skills/*/SKILL.md` define the deployed application's behavioral methods. Skills are read and interpreted by agents; do not replace them with deterministic statistical pipelines.

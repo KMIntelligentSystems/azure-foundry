@@ -33,6 +33,11 @@ export interface DelegationArtifactRef extends ArtifactRef {
   sha256: string;
 }
 
+export interface FulfilledOutputClaim {
+  claimName: string;
+  artifactIds: string[];
+}
+
 export interface DelegationResult {
   runId: string;
   callId: string;
@@ -48,6 +53,7 @@ export interface DelegationResult {
   catalogUpdated: boolean;
   inputArtifacts: StagedDelegationInput[];
   artifacts: DelegationArtifactRef[];
+  fulfilledClaims: FulfilledOutputClaim[];
   error?: string;
 }
 
@@ -186,6 +192,7 @@ export async function executeDelegation(
       { userId },
       1,
       dependencies.modelCaller ?? callLlm,
+      action.outputClaims,
     );
 
     const after = fingerprints(workspace);
@@ -201,6 +208,14 @@ export async function executeDelegation(
         workspaceId,
         sha256: after.get(artifact.path)!.sha256,
       }));
+    const refsByPath = new Map(refs.map((artifact) => [artifact.path.replace(/\\/g, "/"), artifact.id]));
+    const fulfilledClaims = run.claimedOutputs.map((claim) => {
+      const artifactIds = claim.paths.map((claimedPath) => refsByPath.get(claimedPath.replace(/\\/g, "/")));
+      if (artifactIds.some((artifactId) => !artifactId)) {
+        throw new Error(`output claim '${claim.claimName}' references a file not produced or changed by this delegation`);
+      }
+      return { claimName: claim.claimName, artifactIds: artifactIds as string[] };
+    });
     const succeeded = run.terminatedBy !== "limit";
     return {
       runId,
@@ -217,6 +232,7 @@ export async function executeDelegation(
       catalogUpdated: run.catalogUpdated,
       inputArtifacts: stagedInputs,
       artifacts: refs,
+      fulfilledClaims,
       ...(!succeeded ? { error: run.output } : {}),
     };
   } catch (error) {
@@ -249,6 +265,7 @@ export async function executeDelegation(
       catalogUpdated: false,
       inputArtifacts: stagedInputs,
       artifacts: refs,
+      fulfilledClaims: [],
       error: message,
     };
   }

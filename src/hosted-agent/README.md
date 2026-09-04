@@ -3,13 +3,12 @@
 Minimal hand-rolled Foundry **hosted agent**: a container you package yourself,
 registered via the SDK, invoked over the Invocations protocol.
 
-> **Dynamic-orchestrator redesign:** Steps 1–4 are implemented but dormant.
-> The action protocol, isolated delegation executor, concurrent iterative model
-> loop, and run-scoped hashed pending-artifact registry are complete. Selected
-> pending IDs now stage actual files into downstream isolated workspaces without
-> passing file content through orchestrator context. The live runtime has not
-> yet switched from the existing planner/executor. Step 5 adds durable run/event
-> state and reconnect. See `design/dynamic-orchestrator-redesign.md`.
+> **Dynamic orchestrator:** The ACA gateway uses the concurrent iterative model
+> loop, isolated specialist workspaces, and conversation-scoped pending artifact
+> handoff. Every delegate action declares bounded OUTPUT CLAIMS; specialists map
+> produced paths to those claims, and the executor returns claim-to-pending-ID
+> mappings. The runtime no longer infers a whole-ADL or fixed-gallery contract
+> from task wording. See `design/dynamic-orchestrator-redesign.md`.
 
 ## Files
 

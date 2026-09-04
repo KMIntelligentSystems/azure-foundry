@@ -11,6 +11,13 @@ import type { FunctionCall, ToolSpec } from "./foundry.js";
  * orchestrator inspecting the returned summaries and artifact references.
  */
 
+export interface OutputClaim {
+  name: string;
+  description: string;
+  mimeType: string;
+  minimumCount: number;
+}
+
 export interface DelegateAction {
   type: "delegate";
   callId: string;
@@ -18,6 +25,7 @@ export interface DelegateAction {
   task: string;
   deployment: string;
   inputArtifactIds: string[];
+  outputClaims: OutputClaim[];
 }
 
 export interface FinishAction {
@@ -65,8 +73,23 @@ export const DELEGATE_TOOL: ToolSpec = {
         items: { type: "string" },
         description: "Existing artifact ids to stage as inputs. Use an empty array when no artifacts are required.",
       },
+      outputClaims: {
+        type: "array",
+        description: "Artifacts this bounded delegation promises to produce. Use an empty array only when no file output is required.",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Unique semantic output name within this delegation." },
+            description: { type: "string", description: "What evidence the output must contain." },
+            mimeType: { type: "string", description: "Required MIME type, e.g. text/csv, application/json, text/markdown, text/html." },
+            minimumCount: { type: "integer", minimum: 1, description: "Minimum number of artifacts required for this claim." },
+          },
+          required: ["name", "description", "mimeType", "minimumCount"],
+          additionalProperties: false,
+        },
+      },
     },
-    required: ["agent", "task", "deployment", "inputArtifactIds"],
+    required: ["agent", "task", "deployment", "inputArtifactIds", "outputClaims"],
     additionalProperties: false,
   },
 };
@@ -98,6 +121,10 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+const ALLOWED_OUTPUT_MIME_TYPES = new Set([
+  "text/csv", "application/json", "text/markdown", "text/plain", "text/html", "image/svg+xml",
+]);
+
 /**
  * Validate a complete orchestrator response before any delegation executes.
  * A partially invalid batch is rejected as a whole, preventing half-executed
@@ -127,6 +154,7 @@ export function validateOrchestratorCalls(
       const task = call.args["task"];
       const deployment = call.args["deployment"];
       const rawArtifacts = call.args["inputArtifactIds"];
+      const rawClaims = call.args["outputClaims"];
 
       if (!nonEmptyString(agent) || !agents.has(agent)) {
         errors.push(`delegate targets unknown agent '${String(agent ?? "")}'`);
@@ -144,6 +172,33 @@ export function validateOrchestratorCalls(
         errors.push(`delegate for '${agent}' has invalid inputArtifactIds`);
         continue;
       }
+      if (!Array.isArray(rawClaims)) {
+        errors.push(`delegate for '${agent}' has invalid outputClaims`);
+        continue;
+      }
+      const claims: OutputClaim[] = [];
+      const claimNames = new Set<string>();
+      let claimsValid = true;
+      for (const raw of rawClaims as Array<Record<string, unknown>>) {
+        const name = raw?.["name"];
+        const description = raw?.["description"];
+        const mimeType = raw?.["mimeType"];
+        const minimumCount = raw?.["minimumCount"];
+        if (!nonEmptyString(name) || !nonEmptyString(description) || !nonEmptyString(mimeType) ||
+            !ALLOWED_OUTPUT_MIME_TYPES.has(mimeType) || !Number.isInteger(minimumCount) || Number(minimumCount) < 1) {
+          errors.push(`delegate for '${agent}' has malformed output claim '${String(name ?? "")}'`);
+          claimsValid = false;
+          continue;
+        }
+        if (claimNames.has(name)) {
+          errors.push(`delegate for '${agent}' has duplicate output claim '${name}'`);
+          claimsValid = false;
+          continue;
+        }
+        claimNames.add(name);
+        claims.push({ name, description, mimeType, minimumCount: Number(minimumCount) });
+      }
+      if (!claimsValid) continue;
 
       actions.push({
         type: "delegate",
@@ -152,6 +207,7 @@ export function validateOrchestratorCalls(
         task,
         deployment,
         inputArtifactIds: [...new Set(rawArtifacts as string[])],
+        outputClaims: claims,
       });
       continue;
     }

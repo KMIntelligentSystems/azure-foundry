@@ -138,9 +138,13 @@ Step 2 remains dormant: the live planner/sequential orchestrator does not call
 
 `src/hosted-agent/orchestrator-protocol.ts` defines:
 
-- `delegate(agent, task, deployment, inputArtifactIds[])`
+- `delegate(agent, task, deployment, inputArtifactIds[], outputClaims[])`
 - `finish(response)`
 - typed actions produced from Foundry function calls
+- delegation-specific output claims with unique semantic names, descriptions,
+  MIME types, and minimum artifact counts
+- specialist finish mappings from claim names to produced workspace paths
+- executor mappings from fulfilled claims to pending artifact IDs
 - catalogue validation for real agents and worker deployments
 - non-empty task/response validation
 - de-duplication of input artifact IDs

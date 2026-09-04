@@ -30,6 +30,7 @@ import { execFile } from "node:child_process";
 import { callLlm, type ToolSpec } from "./foundry.js";
 import type { Role } from "./imports.js";
 import { listSkills, readSkill } from "./skills.js";
+import type { OutputClaim } from "./orchestrator-protocol.js";
 
 // ── Tool result wire ──────────────────────────────────────────────────────
 
@@ -1046,12 +1047,27 @@ const CATALOG: Record<string, ToolDef> = {
 const FINISH_TOOL: ToolSpec = {
   type: "function",
   name: "finish",
-  description: "End this step. Call with your final output for the orchestrator.",
+  description: "End this step. Map every promised output claim to the workspace files that fulfill it.",
   strict: true,
   parameters: {
     type: "object",
-    properties: { output: { type: "string", description: "The step's result text (or artifact summary)." } },
-    required: ["output"],
+    properties: {
+      output: { type: "string", description: "The step's result summary." },
+      outputs: {
+        type: "array",
+        description: "Claim-to-file mappings. Use [] when this delegation has no output claims.",
+        items: {
+          type: "object",
+          properties: {
+            claimName: { type: "string" },
+            paths: { type: "array", items: { type: "string" } },
+          },
+          required: ["claimName", "paths"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["output", "outputs"],
     additionalProperties: false,
   },
 };
@@ -1082,12 +1098,18 @@ const MAX_MODEL_CALLS = 30;
 const MAX_TOOL_EXECUTIONS = 80;
 const MAX_OUTPUT_TOKENS_PER_CALL = 8192;
 
+export interface ClaimedOutputPaths {
+  claimName: string;
+  paths: string[];
+}
+
 export interface RoleRunResult {
   output: string;
   usage: { input: number; output: number };
   modelCalls: number;
   toolExecutions: number;
   catalogUpdated: boolean;
+  claimedOutputs: ClaimedOutputPaths[];
   terminatedBy: "finish" | "text" | "limit";
 }
 
@@ -1096,98 +1118,86 @@ function requiresCatalogPersistence(role: Role, task: string): boolean {
     /\b(save|persist|catalog(?:ue)?|artifacts?\s*db|documents)\b/i.test(task);
 }
 
-function csvRows(file: string): string[][] {
-  return fs.readFileSync(file, "utf8").trim().split(/\r?\n/).map((line) => line.split(","));
+function outputMimeType(file: string): string {
+  const lower = file.toLowerCase();
+  if (lower.endsWith(".csv")) return "text/csv";
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".md")) return "text/markdown";
+  if (lower.endsWith(".txt")) return "text/plain";
+  if (lower.endsWith(".html")) return "text/html";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  return "application/octet-stream";
 }
 
-export function requiredOutputErrors(role: Role, task: string, ws: string, catalogUpdated = false): string[] {
-  if (requiresCatalogPersistence(role, task) && !catalogUpdated) {
-    return ["catalog persistence was requested but persist_artifacts has not returned verified artifact ids"];
-  }
-
-  const isGallery = role.name === "coder" && /Part A/i.test(task) && /Part D/i.test(task) && /gallery|charts/i.test(task);
-  if (isGallery) {
-    const chartRoot = path.join(ws, "charts");
-    const charts = fs.existsSync(chartRoot)
-      ? fs.readdirSync(chartRoot).filter((file) => file.toLowerCase().endsWith(".html"))
-      : [];
-    if (charts.length < 18) return [`chart gallery requires at least 18 individual HTML artifacts; found ${charts.length}`];
-  }
-
-  const isFullAdl = role.name === "statistician" &&
-    /adl-monthly-nowcast/i.test(task) &&
-    /LASSO-CV/i.test(task) &&
-    /elastic-net/i.test(task);
-  if (!isFullAdl) return [];
+function validateClaimedOutputs(
+  claims: readonly OutputClaim[],
+  rawOutputs: unknown,
+  ws: string,
+): { errors: string[]; outputs: ClaimedOutputPaths[] } {
   const errors: string[] = [];
-  const required = [
-    "analysis.md", "model_card.json", "nowcast.csv",
-    "backtest.csv", "residuals.csv", "panel.csv",
-    "chart_feed_part_a.json", "chart_feed_part_b.json",
-    "chart_feed_part_c.json", "chart_feed_part_d.json",
-  ];
-  for (const relative of required) {
-    const full = path.join(ws, relative);
-    if (!fs.existsSync(full) || !fs.statSync(full).isFile() || fs.statSync(full).size === 0) {
-      errors.push(`missing required ADL output: ${relative}`);
+  const outputs: ClaimedOutputPaths[] = [];
+  if (!Array.isArray(rawOutputs)) return { errors: ["finish outputs must be an array"], outputs };
+  const claimsByName = new Map(claims.map((claim) => [claim.name, claim]));
+  const usedPaths = new Set<string>();
+  for (const raw of rawOutputs as Array<Record<string, unknown>>) {
+    const claimName = String(raw?.["claimName"] ?? "").trim();
+    const paths = Array.isArray(raw?.["paths"])
+      ? (raw["paths"] as unknown[]).map((value) => String(value).trim()).filter(Boolean)
+      : [];
+    const claim = claimsByName.get(claimName);
+    if (!claim) {
+      errors.push(`unknown output claim '${claimName}'`);
+      continue;
     }
-  }
-  if (errors.length) return errors;
-
-  try {
-    const backtest = csvRows(path.join(ws, "backtest.csv"));
-    const origins = backtest.slice(1).map((row) => row[0]);
-    if (origins.length !== 136 || origins[0] !== "2015-01" || origins.at(-1) !== "2026-04") {
-      errors.push(`backtest.csv must contain 136 origins from 2015-01 through 2026-04; found ${origins.length}, ${origins[0] ?? "none"} through ${origins.at(-1) ?? "none"}`);
+    if (outputs.some((output) => output.claimName === claimName)) {
+      errors.push(`output claim '${claimName}' is mapped more than once`);
+      continue;
     }
-  } catch (error) {
-    errors.push(`invalid backtest.csv: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  try {
-    const panel = csvRows(path.join(ws, "panel.csv"));
-    if (panel.length - 1 < 200 || panel[0].length < 29) {
-      errors.push(`panel.csv is not a full modeling panel: ${panel.length - 1} rows, ${panel[0]?.length ?? 0} columns`);
-    }
-  } catch (error) {
-    errors.push(`invalid panel.csv: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  try {
-    const residuals = csvRows(path.join(ws, "residuals.csv"));
-    if (residuals.length - 1 < 100) errors.push(`residuals.csv must contain substantive fitted/walk-forward errors; found ${residuals.length - 1} rows`);
-  } catch (error) {
-    errors.push(`invalid residuals.csv: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  try {
-    const rows = csvRows(path.join(ws, "nowcast.csv")).slice(1);
-    const terms = new Map(rows.map((row) => [row[0], { growth: Number(row[1]), level: Number(row[2]) }]));
-    for (const interval of ["80", "95"]) {
-      const lower = terms.get(`pi_${interval}_lower`);
-      const upper = terms.get(`pi_${interval}_upper`);
-      const point = terms.get("point");
-      if (!lower || !upper || !point || !(lower.growth < point.growth && point.growth < upper.growth) || !(lower.level < point.level && point.level < upper.level)) {
-        errors.push(`nowcast.csv has missing or degenerate ${interval}% prediction interval`);
+    for (const relative of paths) {
+      if (usedPaths.has(relative)) {
+        errors.push(`output path '${relative}' is assigned to more than one claim`);
+        continue;
       }
+      const full = resolveInWorkspace(ws, relative);
+      if (!full) {
+        errors.push(`output path '${relative}' escapes the workspace`);
+        continue;
+      }
+      const fileError = workspaceFileError(full);
+      if (fileError) {
+        errors.push(`output path '${relative}' is not a regular file`);
+        continue;
+      }
+      if (fs.statSync(full).size === 0) errors.push(`output path '${relative}' is empty`);
+      if (outputMimeType(relative) !== claim.mimeType) {
+        errors.push(`output path '${relative}' has MIME ${outputMimeType(relative)}, expected ${claim.mimeType}`);
+      }
+      usedPaths.add(relative);
     }
-  } catch (error) {
-    errors.push(`invalid nowcast.csv: ${error instanceof Error ? error.message : String(error)}`);
+    outputs.push({ claimName, paths });
   }
-  try {
-    const card = JSON.parse(fs.readFileSync(path.join(ws, "model_card.json"), "utf8")) as Record<string, unknown>;
-    const metrics = card["cv_metrics"] as Record<string, unknown> | undefined;
-    const features = card["features"] as unknown[] | undefined;
-    if (!metrics || !["naive_floor", "adl_ols_bic", "lasso_cv", "elastic_net_cv"].every((key) => metrics[key])) {
-      errors.push("model_card.json lacks all four model CV metrics");
+  for (const claim of claims) {
+    const mapped = outputs.find((output) => output.claimName === claim.name);
+    if (!mapped || mapped.paths.length < claim.minimumCount) {
+      errors.push(`output claim '${claim.name}' requires at least ${claim.minimumCount} artifact(s)`);
     }
-    if (!features || features.length !== 28) errors.push(`model_card.json must list 28 features; found ${features?.length ?? 0}`);
-    if (typeof card["survey_block_delta_rmse"] !== "number") errors.push("model_card.json lacks numeric survey_block_delta_rmse");
-  } catch (error) {
-    errors.push(`invalid model_card.json: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const analysis = fs.readFileSync(path.join(ws, "analysis.md"), "utf8");
-  for (const caveat of ["SA freeze", "COVID", "NAICS-2017", "empirical"]) {
-    if (!analysis.toLowerCase().includes(caveat.toLowerCase())) errors.push(`analysis.md lacks required caveat: ${caveat}`);
+  return { errors, outputs };
+}
+
+function completionContract(
+  role: Role,
+  task: string,
+  ws: string,
+  claims: readonly OutputClaim[],
+  rawOutputs: unknown,
+  catalogUpdated: boolean,
+): { errors: string[]; outputs: ClaimedOutputPaths[] } {
+  const validated = validateClaimedOutputs(claims, rawOutputs, ws);
+  if (requiresCatalogPersistence(role, task) && !catalogUpdated) {
+    validated.errors.push("catalog persistence was requested but persist_artifacts has not returned verified artifact ids");
   }
-  return errors;
+  return validated;
 }
 
 export async function runRole(
@@ -1199,6 +1209,7 @@ export async function runRole(
   ctx?: { userId?: string },
   round = 1,
   modelCaller: typeof callLlm = callLlm,
+  outputClaims: readonly OutputClaim[] = [],
 ): Promise<RoleRunResult> {
   const ws = workspaceRoot(conversationId);
   markWorkspaceOwner(ws, ctx?.userId);
@@ -1211,10 +1222,14 @@ export async function runRole(
   let modelCalls = 0;
   let toolExecutions = 0;
   let catalogUpdated = false;
+  let claimedOutputs: ClaimedOutputPaths[] = [];
 
+  const claimText = outputClaims.length === 0
+    ? "(no file outputs claimed)"
+    : outputClaims.map((claim) => `- ${claim.name} [${claim.mimeType}, minimum ${claim.minimumCount}]: ${claim.description}`).join("\n");
   const input: unknown[] = [
-    { role: "user", content: `TASK:\n${task}\n\nUPSTREAM RESULTS:\n${upstreamText || "(none)"}\n\nWorkspace files persist across steps of this conversation. Call finish(output) when done.` },
-  ];
+    { role: "user", content: `TASK:\n${task}\n\nUPSTREAM RESULTS:\n${upstreamText || "(none)"}\n\nOUTPUT CLAIMS FOR THIS DELEGATION:\n${claimText}\n\nCreate only the bounded outputs needed for this task. Call finish with output plus outputs=[{claimName, paths}] mapping every promised claim to files in this workspace.` },
+  ]; 
 
   let terminatedBy: RoleRunResult["terminatedBy"] = "limit";
   let output = "";
@@ -1224,7 +1239,7 @@ export async function runRole(
       model: deployment,
       instructions: role.instructions,
       input,
-      tools: allowed.length > 0 ? tools : undefined,
+      tools,
       maxOutputTokens: MAX_OUTPUT_TOKENS_PER_CALL,
     });
     modelCalls++;
@@ -1236,11 +1251,10 @@ export async function runRole(
     input.push(...res.rawOutput);
     const calls = res.functionCalls;
     if (calls.length === 0) {
-      const contractErrors = requiredOutputErrors(role, task, ws, catalogUpdated);
-      if (contractErrors.length > 0) {
+      if (outputClaims.length > 0 || requiresCatalogPersistence(role, task)) {
         input.push({
           role: "user",
-          content: `You have not completed the required output contract: ${contractErrors.join("; ")}. Continue the computation and write every required file before finishing. Do not report placeholder values.`,
+          content: "This delegation has an explicit completion contract. Call finish with the required claim-to-file mappings; do not return unstructured text.",
         });
         continue;
       }
@@ -1251,15 +1265,16 @@ export async function runRole(
 
     for (const c of calls) {
       if (c.name === "finish") {
-        const contractErrors = requiredOutputErrors(role, task, ws, catalogUpdated);
-        if (contractErrors.length > 0) {
+        const contract = completionContract(role, task, ws, outputClaims, c.args["outputs"], catalogUpdated);
+        if (contract.errors.length > 0) {
           input.push({
             type: "function_call_output",
             call_id: c.callId,
-            output: JSON.stringify(err("output_contract_incomplete", contractErrors.join("; "))),
+            output: JSON.stringify(err("output_contract_incomplete", contract.errors.join("; "))),
           });
           continue;
         }
+        claimedOutputs = contract.outputs;
         output = String(c.args["output"] ?? "");
         terminatedBy = "finish";
         break;
@@ -1285,5 +1300,5 @@ export async function runRole(
   }
 
   if (!output) output = `step aborted: ${MAX_MODEL_CALLS} model calls exhausted`;
-  return { output, usage, modelCalls, toolExecutions, catalogUpdated, terminatedBy };
+  return { output, usage, modelCalls, toolExecutions, catalogUpdated, claimedOutputs, terminatedBy };
 }
