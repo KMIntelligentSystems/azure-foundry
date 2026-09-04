@@ -8,6 +8,7 @@ import {
   type DelegateAction,
   type FinishAction,
   type OrchestratorAction,
+  type ParallelDelegateAction,
 } from "./orchestrator-protocol.js";
 import { ALLOWLIST, PLANNER_DEPLOYMENT } from "./planner.js";
 import { PendingArtifactRegistry, type PendingArtifactRecord } from "./pending-artifact-registry.js";
@@ -183,7 +184,9 @@ WORKER-CAPABLE FOUNDRY DEPLOYMENTS:
 ${deploymentCatalogue}
 
 RULES:
-- Respond only with function calls to delegate or finish.
+- Respond only with function calls to delegate, delegate_parallel, or finish.
+- When two or more independent bounded outcomes are ready, use one delegate_parallel call with one task per outcome. Do not rely on multiple scalar delegate calls for parallel work.
+- Use scalar delegate only when exactly one bounded outcome is ready.
 - Create each delegated task yourself from the user's request and the returned delegation evidence.
 - Give each delegation one bounded outcome and declare its promised artifacts in outputClaims.
 - Do not forward a multi-model, multi-chart, multi-document request unchanged to one specialist.
@@ -198,6 +201,30 @@ RULES:
 - Preserve the user's requested scope. Do not invent statistics, artifacts, persistence, or completion.
 - Use finish only after the request is complete or when a clear blocker must be reported.
 - Never delegate and finish in the same response.`;
+}
+
+interface ExpandedDelegationBatch {
+  delegates: DelegateAction[];
+  parallel?: ParallelDelegateAction;
+}
+
+function expandDelegations(actions: readonly OrchestratorAction[]): ExpandedDelegationBatch {
+  const parallel = actions.find((action): action is ParallelDelegateAction => action.type === "delegate_parallel");
+  if (parallel) {
+    return {
+      parallel,
+      delegates: parallel.tasks.map((task) => ({
+        type: "delegate",
+        callId: `${parallel.callId}:${task.taskId}`,
+        agent: task.agent,
+        task: task.task,
+        deployment: task.deployment,
+        inputArtifactIds: task.inputArtifactIds,
+        outputClaims: task.outputClaims,
+      })),
+    };
+  }
+  return { delegates: actions.filter((action): action is DelegateAction => action.type === "delegate") };
 }
 
 function compactDelegationResult(result: DelegationResult): Record<string, unknown> {
@@ -398,7 +425,8 @@ export async function runDynamicOrchestrator(
         };
       }
 
-      const delegates = verdict.actions as DelegateAction[];
+      const expanded = expandDelegations(verdict.actions);
+      const delegates = expanded.delegates;
       if (delegates.length > maxDelegates) {
         throw new Error(`orchestrator emitted ${delegates.length} delegates; maximum per round is ${maxDelegates}`);
       }
@@ -431,12 +459,25 @@ export async function runDynamicOrchestrator(
       }
       allDelegations.push(...results);
       rounds.push({ round, actions: verdict.actions, delegations: results, usage: response.usage });
-      for (let index = 0; index < delegates.length; index++) {
+      if (expanded.parallel) {
         input.push({
           type: "function_call_output",
-          call_id: delegates[index].callId,
-          output: JSON.stringify(compactDelegationResult(results[index])),
+          call_id: expanded.parallel.callId,
+          output: JSON.stringify({
+            results: expanded.parallel.tasks.map((task, index) => ({
+              taskId: task.taskId,
+              ...compactDelegationResult(results[index]),
+            })),
+          }),
         });
+      } else {
+        for (let index = 0; index < delegates.length; index++) {
+          input.push({
+            type: "function_call_output",
+            call_id: delegates[index].callId,
+            output: JSON.stringify(compactDelegationResult(results[index])),
+          });
+        }
       }
     }
     throw new Error(`dynamic orchestrator exceeded ${maxRounds} rounds without finish`);

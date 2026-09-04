@@ -139,6 +139,9 @@ Step 2 remains dormant: the live planner/sequential orchestrator does not call
 `src/hosted-agent/orchestrator-protocol.ts` defines:
 
 - `delegate(agent, task, deployment, inputArtifactIds[], outputClaims[])`
+- `delegate_parallel(tasks[])` for an explicit model-created concurrent batch;
+  each nested task has its own taskId, agent, bounded task, deployment, selected
+  artifact IDs, and output claims
 - `finish(response)`
 - typed actions produced from Foundry function calls
 - delegation-specific output claims with unique semantic names, descriptions,

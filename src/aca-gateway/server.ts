@@ -147,19 +147,19 @@ function dynamicWireEvent(turn: ActiveTurn, event: DynamicOrchestratorEvent): vo
       publish(turn, { type: "agent_event", event: { type: "planning_start", conversationId, round: event.round ?? 1 } });
       break;
     case "orchestrator_actions": {
-      const delegates = (event.actions ?? []).filter((action) => action.type === "delegate");
+      const delegates = (event.actions ?? []).flatMap((action) =>
+        action.type === "delegate" ? [action]
+          : action.type === "delegate_parallel" ? action.tasks.map((task) => ({ type: "delegate" as const, callId: `${action.callId}:${task.taskId}`, ...task }))
+            : [],
+      );
       if (delegates.length > 0) {
         publish(turn, {
           type: "agent_event",
           event: {
             type: "plan", conversationId, round: event.round ?? 1,
-            rationale: `Dynamic orchestrator delegated ${delegates.length} specialist task(s).`,
+            rationale: `Dynamic orchestrator delegated ${delegates.length} specialist task(s)${(event.actions ?? []).some((action) => action.type === "delegate_parallel") ? " as an explicit parallel batch" : ""}.`,
             continuePlanning: true,
-            steps: delegates.map((action) => ({
-              role: action.type === "delegate" ? action.agent : "",
-              task: action.type === "delegate" ? action.task : "",
-              deployment: action.type === "delegate" ? action.deployment : "",
-            })),
+            steps: delegates.map((action) => ({ role: action.agent, task: action.task, deployment: action.deployment })),
           },
         });
       }

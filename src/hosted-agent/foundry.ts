@@ -110,6 +110,7 @@ export async function callLlm(opts: CallOpts): Promise<LlmResult> {
     input: opts.input,
     tools: opts.tools ?? [],
     tool_choice: (opts.tools?.length ?? 0) > 0 ? "auto" : "none",
+    parallel_tool_calls: true,
     temperature: 0,
     max_output_tokens: opts.maxOutputTokens ?? 4096,
     store: false,

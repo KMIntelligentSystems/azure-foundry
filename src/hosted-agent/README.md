@@ -7,7 +7,8 @@ registered via the SDK, invoked over the Invocations protocol.
 > loop, isolated specialist workspaces, and conversation-scoped pending artifact
 > handoff. Every delegate action declares bounded OUTPUT CLAIMS; specialists map
 > produced paths to those claims, and the executor returns claim-to-pending-ID
-> mappings. The runtime no longer infers a whole-ADL or fixed-gallery contract
+> mappings. `delegate_parallel(tasks[])` gives the model one explicit batch tool
+> whose nested tasks execute concurrently. The runtime no longer infers a whole-ADL or fixed-gallery contract
 > from task wording. See `design/dynamic-orchestrator-redesign.md`.
 
 ## Files

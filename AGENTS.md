@@ -4,7 +4,7 @@ This project was built with the microsoft-foundry skill. Before working on or an
 
 ## Architecture invariants
 
-- Dynamic delegations use model-authored, delegation-specific OUTPUT CLAIMS. Each bounded delegation declares semantic output names, MIME types, descriptions, and minimum counts; the specialist maps only files produced by that delegation to those claims in finish(). The runtime validates that generic contract and returns claim-to-pending-ID mappings. Do not restore task-wording-based whole-ADL or fixed-gallery completion gates.
+- Dynamic delegations use model-authored, delegation-specific OUTPUT CLAIMS. Each bounded delegation declares semantic output names, MIME types, descriptions, and minimum counts; the specialist maps only files produced by that delegation to those claims in finish(). The runtime validates that generic contract and returns claim-to-pending-ID mappings. `delegate_parallel(tasks[])` is the explicit parallel affordance: one orchestrator tool call creates two or more independent isolated delegations, which execute through the existing bounded scheduler and return one correlated batch result. Do not restore task-wording-based whole-ADL or fixed-gallery completion gates.
 
 - `src/hosted-agent/agents/*.md` define the deployed application's stable role behavior and tool grants.
 - `src/hosted-agent/skills/*/SKILL.md` define the deployed application's behavioral methods. Skills are read and interpreted by agents; do not replace them with deterministic statistical pipelines.
