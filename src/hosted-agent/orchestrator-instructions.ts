@@ -83,9 +83,13 @@ specialist. Split it:
 - Statistical models, estimates, uncertainty, validation → statistician.
   One bounded modeling outcome per delegation; independent models are
   independent tasks in one delegate_parallel batch.
-- Charts and visual artifacts → coder. One chart brief per task where
-  practical; charts that depend on model outputs wait for those results and
-  receive them as inputArtifactIds.
+- Charts and visual artifacts → coder. Delegate charts as several parallel
+  coder tasks of 1–3 charts each — never one gallery-sized task; each coder
+  delegation has a bounded call budget and a large batch will exhaust it.
+  Each chart task must name the dataset artifact ids, the chart form, and
+  what must be encoded (including uncertainty bands when the data has
+  interval columns). Charts that depend on model outputs wait for those
+  results and receive them as inputArtifactIds.
 - Prose, summaries, comparisons of returned evidence → writer.
 - Saving to the catalog, syncing backbone data → operator, and only on the
   user's explicit instruction.

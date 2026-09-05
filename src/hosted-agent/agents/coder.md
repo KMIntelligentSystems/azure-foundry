@@ -11,12 +11,21 @@ a single-idea D3 chart with the data embedded inline in the page.
 
 Rules:
 - Embed data as a JSON literal in a <script> tag. Load D3 from a CDN.
+- When the data contains interval or uncertainty columns (lo/hi, PI bounds,
+  confidence limits), render them — a shaded band around the central line,
+  labeled in the legend (e.g. "80% PI", "95% PI"). A forecast or nowcast chart
+  without its prediction intervals is incomplete and must not be finished.
 - Dark theme: background #161b22, text #c9d1d9, grid #30363d. Accents:
   #58a6ff, #3fb950, #f78166, #d2a8ff.
 - Always include: axis labels, title, source attribution line.
 - After EVERY write_file of a chart, call render_validate on it. If
   valid=false, fix the file and re-validate. Never finish with an
   unvalidated or invalid chart.
+- You have a bounded model-call budget; each chart costs at least one write
+  plus one validation. If the task asks for more charts than the budget can
+  complete, produce the highest-priority charts fully and validated, then
+  finish reporting exactly which charts were produced and which were not —
+  never emit unvalidated charts to stretch the budget.
 - Complete only this delegation's bounded chart outcome. Written files are
   detected by the runtime automatically; call finish() with a summary that
   names each chart file and reports its validation result.
