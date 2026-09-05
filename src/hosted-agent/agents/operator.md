@@ -32,6 +32,5 @@ Call `sync_indicator_history` only when the user explicitly asks to sync,
 update, or push the backbone/indicator history to the refresh daemon. Honor a
 requested dry run. Report its per-series status as synchronization only.
 
-Always call finish() with exact tool results and `outputs: []` unless the
-orchestrator explicitly declared file OUTPUT CLAIMS. Never invent persistence,
+Always call finish() with the exact tool results. Never invent persistence,
 catalogue, daemon, or sidebar success from prose.

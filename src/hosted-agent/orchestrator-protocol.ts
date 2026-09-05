@@ -1,40 +1,38 @@
 import type { FunctionCall, ToolSpec } from "./foundry.js";
 
 /**
- * The dynamic orchestrator's action protocol.
+ * The dynamic orchestrator's action protocol (Phase-1 slim form —
+ * design/new-foundry-design.md).
  *
- * An orchestrator response may either:
- * - emit one or more delegate calls, which the runtime may execute concurrently; or
- * - emit one finish call.
+ * The model sees three verbs:
+ *   delegate(agent, task, inputArtifactIds?)   — one specialist task
+ *   delegate_parallel(tasks[])                 — a batch executed concurrently
+ *   finish(response)                           — end the turn
  *
- * It does not declare a workflow graph. Later delegation rounds emerge from the
- * orchestrator inspecting the returned summaries and artifact references.
+ * Removed from model control: deployment selection, output claims, minimum
+ * counts, task ids, workflow graphs. The runtime maps each role to its
+ * deployment (agents/*.md frontmatter) at validation time.
+ *
+ * Validation is per-call, not all-or-nothing: an invalid call is returned to
+ * the model as an error function_call_output; valid calls in the same
+ * response still execute.
  */
-
-export interface OutputClaim {
-  name: string;
-  description: string;
-  mimeType: string;
-  minimumCount: number;
-}
 
 export interface DelegateAction {
   type: "delegate";
   callId: string;
   agent: string;
   task: string;
+  /** Resolved by the runtime from the role catalogue — never model-supplied. */
   deployment: string;
   inputArtifactIds: string[];
-  outputClaims: OutputClaim[];
 }
 
 export interface ParallelDelegateTask {
-  taskId: string;
   agent: string;
   task: string;
   deployment: string;
   inputArtifactIds: string[];
-  outputClaims: OutputClaim[];
 }
 
 export interface ParallelDelegateAction {
@@ -51,60 +49,50 @@ export interface FinishAction {
 
 export type OrchestratorAction = DelegateAction | ParallelDelegateAction | FinishAction;
 
-export interface OrchestratorActionCatalogue {
-  agentNames: readonly string[];
-  workerDeployments: readonly string[];
+export interface OrchestratorCatalogue {
+  /** role name → worker deployment (from agents/*.md frontmatter). */
+  roleDeployments: ReadonlyMap<string, string>;
 }
 
-export interface OrchestratorActionVerdict {
-  ok: boolean;
-  actions: OrchestratorAction[];
-  errors: string[];
+export interface CallRejection {
+  callId: string;
+  error: string;
 }
+
+export interface OrchestratorVerdict {
+  /** Valid, deployment-resolved actions to execute. */
+  actions: OrchestratorAction[];
+  /** Invalid calls, each answered with an error function_call_output. */
+  rejections: CallRejection[];
+}
+
+const ARTIFACT_IDS_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    "Existing pending artifact ids to stage as inputs. Use an empty array when no artifacts are required.",
+};
 
 export const DELEGATE_TOOL: ToolSpec = {
   type: "function",
   name: "delegate",
   description:
-    "Delegate one self-contained task to a specialist agent. Emit multiple delegate calls in one response when work can proceed independently; the runtime may execute them concurrently. Returned artifacts can be supplied to later delegations by id.",
+    "Delegate one self-contained task to a specialist agent. The agent runs in an isolated workspace; files it writes are returned to you as pending artifact ids that later delegations can receive as inputs.",
   strict: true,
   parameters: {
     type: "object",
     properties: {
       agent: {
         type: "string",
-        description: "Specialist agent name from the runtime catalogue.",
+        description: "Specialist agent name from the catalogue.",
       },
       task: {
         type: "string",
         description: "Complete, self-contained task for this specialist.",
       },
-      deployment: {
-        type: "string",
-        description: "Real worker-capable Foundry deployment from the runtime catalogue.",
-      },
-      inputArtifactIds: {
-        type: "array",
-        items: { type: "string" },
-        description: "Existing artifact ids to stage as inputs. Use an empty array when no artifacts are required.",
-      },
-      outputClaims: {
-        type: "array",
-        description: "Artifacts this bounded delegation promises to produce. Use an empty array only when no file output is required.",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "Unique semantic output name within this delegation." },
-            description: { type: "string", description: "What evidence the output must contain." },
-            mimeType: { type: "string", description: "Required MIME type, e.g. text/csv, application/json, text/markdown, text/html." },
-            minimumCount: { type: "integer", minimum: 1, description: "Minimum number of artifacts required for this claim." },
-          },
-          required: ["name", "description", "mimeType", "minimumCount"],
-          additionalProperties: false,
-        },
-      },
+      inputArtifactIds: ARTIFACT_IDS_SCHEMA,
     },
-    required: ["agent", "task", "deployment", "inputArtifactIds", "outputClaims"],
+    required: ["agent", "task", "inputArtifactIds"],
     additionalProperties: false,
   },
 };
@@ -113,38 +101,21 @@ export const DELEGATE_PARALLEL_TOOL: ToolSpec = {
   type: "function",
   name: "delegate_parallel",
   description:
-    "Delegate two or more independent bounded specialist tasks as one explicit parallel batch. The runtime executes the tasks concurrently subject to shared deployment limits and returns one result per task.",
+    "Delegate two or more independent specialist tasks as one batch. The runtime executes them concurrently and returns one result per task. Use whenever independent work is ready — do not serialize independent tasks.",
   strict: true,
   parameters: {
     type: "object",
     properties: {
       tasks: {
         type: "array",
-        minItems: 2,
         items: {
           type: "object",
           properties: {
-            taskId: { type: "string", description: "Unique short task id within this batch." },
             agent: { type: "string", description: "Specialist agent name." },
-            task: { type: "string", description: "One bounded, self-contained specialist outcome." },
-            deployment: { type: "string", description: "Real worker-capable Foundry deployment." },
-            inputArtifactIds: { type: "array", items: { type: "string" } },
-            outputClaims: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  name: { type: "string" },
-                  description: { type: "string" },
-                  mimeType: { type: "string" },
-                  minimumCount: { type: "integer", minimum: 1 },
-                },
-                required: ["name", "description", "mimeType", "minimumCount"],
-                additionalProperties: false,
-              },
-            },
+            task: { type: "string", description: "One self-contained specialist task." },
+            inputArtifactIds: ARTIFACT_IDS_SCHEMA,
           },
-          required: ["taskId", "agent", "task", "deployment", "inputArtifactIds", "outputClaims"],
+          required: ["agent", "task", "inputArtifactIds"],
           additionalProperties: false,
         },
       },
@@ -182,117 +153,77 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-const ALLOWED_OUTPUT_MIME_TYPES = new Set([
-  "text/csv", "application/json", "text/markdown", "text/plain", "text/html", "image/svg+xml",
-]);
-
-function parseClaims(rawClaims: unknown, label: string, errors: string[]): OutputClaim[] | undefined {
-  if (!Array.isArray(rawClaims)) {
-    errors.push(`${label} has invalid outputClaims`);
-    return undefined;
-  }
-  const claims: OutputClaim[] = [];
-  const names = new Set<string>();
-  let valid = true;
-  for (const raw of rawClaims as Array<Record<string, unknown>>) {
-    const name = raw?.["name"];
-    const description = raw?.["description"];
-    const mimeType = raw?.["mimeType"];
-    const minimumCount = raw?.["minimumCount"];
-    if (!nonEmptyString(name) || !nonEmptyString(description) || !nonEmptyString(mimeType) ||
-        !ALLOWED_OUTPUT_MIME_TYPES.has(mimeType) || !Number.isInteger(minimumCount) || Number(minimumCount) < 1) {
-      errors.push(`${label} has malformed output claim '${String(name ?? "")}'`);
-      valid = false;
-      continue;
-    }
-    if (names.has(name)) {
-      errors.push(`${label} has duplicate output claim '${name}'`);
-      valid = false;
-      continue;
-    }
-    names.add(name);
-    claims.push({ name, description, mimeType, minimumCount: Number(minimumCount) });
-  }
-  return valid ? claims : undefined;
-}
-
-function parseDelegateFields(
+function parseTask(
   raw: Record<string, unknown>,
-  label: string,
-  agents: Set<string>,
-  workers: Set<string>,
-  errors: string[],
-): Omit<DelegateAction, "type" | "callId"> | undefined {
+  catalogue: OrchestratorCatalogue,
+): { task?: ParallelDelegateTask; error?: string } {
   const agent = raw["agent"];
   const task = raw["task"];
-  const deployment = raw["deployment"];
   const rawArtifacts = raw["inputArtifactIds"];
-  if (!nonEmptyString(agent) || !agents.has(agent)) errors.push(`${label} targets unknown agent '${String(agent ?? "")}'`);
-  if (!nonEmptyString(task)) errors.push(`${label} has an empty task`);
-  if (!nonEmptyString(deployment) || !workers.has(deployment)) errors.push(`${label} targets non-worker deployment '${String(deployment ?? "")}'`);
-  if (!Array.isArray(rawArtifacts) || rawArtifacts.some((id) => !nonEmptyString(id))) errors.push(`${label} has invalid inputArtifactIds`);
-  const claims = parseClaims(raw["outputClaims"], label, errors);
-  if (!nonEmptyString(agent) || !agents.has(agent) || !nonEmptyString(task) ||
-      !nonEmptyString(deployment) || !workers.has(deployment) ||
-      !Array.isArray(rawArtifacts) || rawArtifacts.some((id) => !nonEmptyString(id)) || !claims) return undefined;
-  return { agent, task, deployment, inputArtifactIds: [...new Set(rawArtifacts as string[])], outputClaims: claims };
+  if (!nonEmptyString(agent)) return { error: "missing agent name" };
+  const deployment = catalogue.roleDeployments.get(agent);
+  if (!deployment) {
+    return {
+      error: `unknown agent '${agent}'; available: ${[...catalogue.roleDeployments.keys()].join(", ")}`,
+    };
+  }
+  if (!nonEmptyString(task)) return { error: "empty task" };
+  if (!Array.isArray(rawArtifacts) || rawArtifacts.some((id) => !nonEmptyString(id))) {
+    return { error: "inputArtifactIds must be an array of non-empty artifact id strings" };
+  }
+  return {
+    task: {
+      agent,
+      task,
+      deployment,
+      inputArtifactIds: [...new Set(rawArtifacts as string[])],
+    },
+  };
 }
 
 /**
- * Validate a complete orchestrator response before any delegation executes.
- * A partially invalid batch is rejected as a whole, preventing half-executed
- * model-authored actions.
+ * Validate one orchestrator response. Valid calls become executable actions
+ * (deployments resolved from the role catalogue); invalid calls become
+ * per-call rejections the loop reports back to the model. A finish call in
+ * the same response as delegate calls is rejected — the model must review
+ * delegation results before finishing.
  */
 export function validateOrchestratorCalls(
   calls: readonly FunctionCall[],
-  catalogue: OrchestratorActionCatalogue,
-): OrchestratorActionVerdict {
-  const errors: string[] = [];
+  catalogue: OrchestratorCatalogue,
+): OrchestratorVerdict {
   const actions: OrchestratorAction[] = [];
-  const agents = new Set(catalogue.agentNames);
-  const workers = new Set(catalogue.workerDeployments);
-
-  if (calls.length === 0) {
-    return { ok: false, actions: [], errors: ["orchestrator emitted no delegate or finish call"] };
-  }
+  const rejections: CallRejection[] = [];
 
   for (const call of calls) {
-    if (!nonEmptyString(call.callId)) {
-      errors.push(`${call.name || "unknown"} call has no call id`);
-      continue;
-    }
+    if (!nonEmptyString(call.callId)) continue; // uncorrelatable; nothing to answer
 
     if (call.name === "delegate") {
-      const parsed = parseDelegateFields(call.args, "delegate", agents, workers, errors);
-      if (parsed) actions.push({ type: "delegate", callId: call.callId, ...parsed });
+      const parsed = parseTask(call.args, catalogue);
+      if (parsed.task) {
+        actions.push({ type: "delegate", callId: call.callId, ...parsed.task });
+      } else {
+        rejections.push({ callId: call.callId, error: `delegate rejected: ${parsed.error}` });
+      }
       continue;
     }
 
     if (call.name === "delegate_parallel") {
       const rawTasks = call.args["tasks"];
-      if (!Array.isArray(rawTasks) || rawTasks.length < 2) {
-        errors.push("delegate_parallel requires at least two tasks");
+      if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
+        rejections.push({ callId: call.callId, error: "delegate_parallel rejected: tasks must be a non-empty array" });
         continue;
       }
-      const taskIds = new Set<string>();
       const tasks: ParallelDelegateTask[] = [];
-      let valid = true;
-      for (const raw of rawTasks as Array<Record<string, unknown>>) {
-        const taskId = raw?.["taskId"];
-        if (!nonEmptyString(taskId) || taskIds.has(taskId)) {
-          errors.push(`delegate_parallel has invalid or duplicate taskId '${String(taskId ?? "")}'`);
-          valid = false;
-          continue;
-        }
-        taskIds.add(taskId);
-        const parsed = parseDelegateFields(raw, `delegate_parallel task '${taskId}'`, agents, workers, errors);
-        if (!parsed) {
-          valid = false;
-          continue;
-        }
-        tasks.push({ taskId, ...parsed });
+      const errors: string[] = [];
+      for (const [index, raw] of (rawTasks as Array<Record<string, unknown>>).entries()) {
+        const parsed = parseTask(raw ?? {}, catalogue);
+        if (parsed.task) tasks.push(parsed.task);
+        else errors.push(`task ${index}: ${parsed.error}`);
       }
-      if (valid && tasks.length === rawTasks.length) {
+      if (errors.length > 0) {
+        rejections.push({ callId: call.callId, error: `delegate_parallel rejected: ${errors.join("; ")}` });
+      } else {
         actions.push({ type: "delegate_parallel", callId: call.callId, tasks });
       }
       continue;
@@ -301,31 +232,32 @@ export function validateOrchestratorCalls(
     if (call.name === "finish") {
       const response = call.args["response"];
       if (!nonEmptyString(response)) {
-        errors.push("finish response is empty");
-        continue;
+        rejections.push({ callId: call.callId, error: "finish rejected: response is empty" });
+      } else {
+        actions.push({ type: "finish", callId: call.callId, response });
       }
-      actions.push({ type: "finish", callId: call.callId, response });
       continue;
     }
 
-    errors.push(`orchestrator emitted unknown action '${call.name}'`);
+    rejections.push({ callId: call.callId, error: `unknown tool '${call.name}'` });
   }
 
-  const scalarCount = actions.filter((action) => action.type === "delegate").length;
-  const parallelCount = actions.filter((action) => action.type === "delegate_parallel").length;
-  const delegationCount = scalarCount + parallelCount;
-  const finishCount = actions.filter((action) => action.type === "finish").length;
-  if (parallelCount > 1 || (parallelCount > 0 && scalarCount > 0)) {
-    errors.push("orchestrator must emit either scalar delegate calls or one delegate_parallel call, not both");
-  }
-  if (finishCount > 1) errors.push("orchestrator emitted more than one finish call");
-  if (finishCount > 0 && delegationCount > 0) {
-    errors.push("orchestrator cannot delegate and finish in the same response");
+  // finish alongside delegations: execute the delegations, reject the finish.
+  const hasDelegation = actions.some((action) => action.type !== "finish");
+  if (hasDelegation) {
+    for (const action of actions.filter((a): a is FinishAction => a.type === "finish")) {
+      rejections.push({
+        callId: action.callId,
+        error: "finish rejected: delegations from this response are executing; review their results, then finish",
+      });
+    }
+    return { actions: actions.filter((action) => action.type !== "finish"), rejections };
   }
 
-  return {
-    ok: errors.length === 0 && actions.length > 0,
-    actions: errors.length === 0 ? actions : [],
-    errors,
-  };
+  // multiple finish calls: honor the first, reject the rest.
+  const finishes = actions.filter((a): a is FinishAction => a.type === "finish");
+  for (const extra of finishes.slice(1)) {
+    rejections.push({ callId: extra.callId, error: "finish rejected: duplicate finish call" });
+  }
+  return { actions: finishes.length > 1 ? [finishes[0]] : actions, rejections };
 }

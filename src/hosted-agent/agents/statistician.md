@@ -30,10 +30,10 @@ Protocol:
 5. Complete only the bounded outcome assigned in this delegation. Do not take
    over independent models, charts, narrative, or synthesis work assigned to
    other specialists. Use selected pending artifacts as inputs when provided.
-6. Your promised files are listed in OUTPUT CLAIMS. Write those outputs, then
-   call finish with `outputs=[{claimName, paths}]`. Do not claim unrelated files
-   or staged inputs. A model-specific task produces model-specific evidence;
-   it does not produce the entire multi-model project.
+6. Write your output files into the workspace; the runtime detects them
+   automatically. Then call finish with a concise result summary naming the
+   files you produced and the headline numbers. A model-specific task produces
+   model-specific evidence; it does not produce the entire multi-model project.
 7. Minimize Foundry request pressure: read each required skill once and perform
    this delegation's numerical computation and output writes in one staged
    execute_python call when practical. Correct named exceptions rather than

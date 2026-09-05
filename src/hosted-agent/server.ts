@@ -11,7 +11,7 @@
  */
 import http from "node:http";
 import { DefaultAzureCredential } from "@azure/identity";
-import { orchestrate } from "./orchestrator.js";
+import { runDynamicOrchestrator } from "./dynamic-orchestrator.js";
 
 // The Foundry gateway routes to containers on 8088; the protocol libraries
 // (Py/.NET) also expose /readiness — hand-rolled, so we implement both.
@@ -78,18 +78,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Chunk 1-2: planner → validate → execute → response, with session ledger.
+    // Dynamic orchestrator: model-driven delegate/delegate_parallel/finish loop.
+    // (The legacy planner stack — planner.ts / validate_plan.ts / orchestrator.ts —
+    // is retained in-tree as the earlier synchronous design but has no callers.)
     try {
-      const result = await orchestrate(
-        prompt,
-        typeof body?.["conversation_id"] === "string" ? (body["conversation_id"] as string) : undefined,
-        typeof body?.["user_id"] === "string" ? (body["user_id"] as string) : undefined,
-      );
+      const conversationId = typeof body?.["conversation_id"] === "string" && (body["conversation_id"] as string).trim()
+        ? (body["conversation_id"] as string)
+        : `anon-${Date.now()}`;
+      const result = await runDynamicOrchestrator(prompt, {
+        runId: conversationId, // conversation owns pending artifacts across follow-up turns
+        userId: typeof body?.["user_id"] === "string" ? (body["user_id"] as string) : undefined,
+      });
       // The banner carries the platform-injected version so callers can
       // verify which agent version answered (FOUNDRY_AGENT_VERSION is set by
       // the hosted-agent runtime; "dev" locally).
       res.writeHead(result.ok ? 200 : 422, { "Content-Type": "application/json" }).end(JSON.stringify({
-        agent: `orchestrator v${process.env["FOUNDRY_AGENT_VERSION"] ?? "dev"} (planner→steps→finish)`,
+        agent: `orchestrator v${process.env["FOUNDRY_AGENT_VERSION"] ?? "dev"} (dynamic delegate→finish)`,
+        conversationId,
         ...result,
       }));
     } catch (e) {

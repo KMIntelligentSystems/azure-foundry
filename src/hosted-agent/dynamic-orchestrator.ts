@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import { executeDelegation, type DelegationArtifactStager, type DelegationResult } from "./delegate-executor.js";
+import { ORCHESTRATOR_DEPLOYMENT } from "./deployments.js";
 import { callLlm, type CallOpts, type LlmResult } from "./foundry.js";
 import { loadRoles, type Role } from "./imports.js";
+import { orchestratorInstructions } from "./orchestrator-instructions.js";
 import {
   ORCHESTRATOR_TOOLS,
   validateOrchestratorCalls,
@@ -10,8 +12,8 @@ import {
   type OrchestratorAction,
   type ParallelDelegateAction,
 } from "./orchestrator-protocol.js";
-import { ALLOWLIST, PLANNER_DEPLOYMENT } from "./planner.js";
 import { PendingArtifactRegistry, type PendingArtifactRecord } from "./pending-artifact-registry.js";
+import { listSkills } from "./skills.js";
 
 export interface DynamicOrchestratorEvent {
   type:
@@ -58,7 +60,6 @@ export interface DynamicOrchestratorOptions {
   runId?: string;
   userId?: string;
   maxRounds?: number;
-  maxDelegatesPerRound?: number;
   globalConcurrency?: number;
   perDeploymentConcurrency?: number;
   orchestratorDeployment?: string;
@@ -83,8 +84,8 @@ export interface DynamicOrchestratorDependencies {
   modelCaller?: (options: CallOpts) => Promise<LlmResult>;
   delegationRunner?: DelegationRunner;
   roles?: Role[];
-  workerDeployments?: string[];
   pendingRegistryFactory?: (runId: string) => PendingArtifactRegistryLike;
+  skillCatalogue?: () => Array<{ name: string; description: string }>;
 }
 
 class Semaphore {
@@ -126,7 +127,6 @@ class Semaphore {
 }
 
 const DEFAULT_MAX_ROUNDS = 12;
-const DEFAULT_MAX_DELEGATES_PER_ROUND = 12;
 const DEFAULT_GLOBAL_CONCURRENCY = 3;
 const DEFAULT_PER_DEPLOYMENT_CONCURRENCY = 2;
 const MAX_SUMMARY_CHARS = 6_000;
@@ -160,47 +160,13 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return resolved;
 }
 
-function availableWorkers(): string[] {
-  return ALLOWLIST
-    .filter((deployment) => deployment.kind === "worker" || deployment.kind === "both")
-    .map((deployment) => deployment.name);
-}
-
+/** The orchestration manual lives in orchestrator-instructions.ts; this
+ * wrapper keeps the historical export name used by callers and tests. */
 export function dynamicOrchestratorInstructions(
   roles: readonly Role[],
-  workerDeployments: readonly string[],
+  skills: readonly { name: string; description: string }[] = [],
 ): string {
-  const agentCatalogue = roles
-    .map((role) => `- ${role.name}: ${role.description} (default deployment: ${role.defaultDeployment})`)
-    .join("\n");
-  const deploymentCatalogue = workerDeployments.map((deployment) => `- ${deployment}`).join("\n");
-  return `You are the dynamic orchestrator for a data-analysis and visualization application.
-You decide how to satisfy the user's request by delegating self-contained work to specialist agents, reviewing their returned summaries and artifact references, and then delegating further work or finishing.
-
-SPECIALIST AGENTS:
-${agentCatalogue}
-
-WORKER-CAPABLE FOUNDRY DEPLOYMENTS:
-${deploymentCatalogue}
-
-RULES:
-- Respond only with function calls to delegate, delegate_parallel, or finish.
-- When two or more independent bounded outcomes are ready, use one delegate_parallel call with one task per outcome. Do not rely on multiple scalar delegate calls for parallel work.
-- Use scalar delegate only when exactly one bounded outcome is ready.
-- Create each delegated task yourself from the user's request and the returned delegation evidence.
-- Give each delegation one bounded outcome and declare its promised artifacts in outputClaims.
-- Do not forward a multi-model, multi-chart, multi-document request unchanged to one specialist.
-- Separate independent outcomes into multiple same-response delegate calls.
-- Use fulfilled claim artifact IDs as inputs to later delegations. On failure, correct only the failed bounded outcome.
-- Do not emit a predetermined workflow graph. Decide the next actions after each round of results.
-- Emit multiple delegate calls in the same response when their work is independent; the runtime executes them concurrently.
-- If work depends on an earlier output, wait for that result and pass only the required artifact IDs in inputArtifactIds.
-- A specialist sees its task and selected artifacts, not sibling workspaces or the full orchestrator transcript.
-- Use real agent names and worker deployments from the catalogues above.
-- Inspect failures and delegate a focused correction when appropriate; do not blindly repeat an entire successful task.
-- Preserve the user's requested scope. Do not invent statistics, artifacts, persistence, or completion.
-- Use finish only after the request is complete or when a clear blocker must be reported.
-- Never delegate and finish in the same response.`;
+  return orchestratorInstructions(roles, skills);
 }
 
 interface ExpandedDelegationBatch {
@@ -210,44 +176,40 @@ interface ExpandedDelegationBatch {
 
 function expandDelegations(actions: readonly OrchestratorAction[]): ExpandedDelegationBatch {
   const parallel = actions.find((action): action is ParallelDelegateAction => action.type === "delegate_parallel");
+  const scalar = actions.filter((action): action is DelegateAction => action.type === "delegate");
   if (parallel) {
     return {
       parallel,
-      delegates: parallel.tasks.map((task) => ({
-        type: "delegate",
-        callId: `${parallel.callId}:${task.taskId}`,
-        agent: task.agent,
-        task: task.task,
-        deployment: task.deployment,
-        inputArtifactIds: task.inputArtifactIds,
-        outputClaims: task.outputClaims,
-      })),
+      delegates: [
+        ...parallel.tasks.map((task, index): DelegateAction => ({
+          type: "delegate",
+          callId: `${parallel.callId}:${index}`,
+          agent: task.agent,
+          task: task.task,
+          deployment: task.deployment,
+          inputArtifactIds: task.inputArtifactIds,
+        })),
+        ...scalar,
+      ],
     };
   }
-  return { delegates: actions.filter((action): action is DelegateAction => action.type === "delegate") };
+  return { delegates: scalar };
 }
 
 function compactDelegationResult(result: DelegationResult): Record<string, unknown> {
   return {
     status: result.status,
     agent: result.agent,
-    deployment: result.deployment,
     summary: result.summary.slice(0, MAX_SUMMARY_CHARS),
     error: result.error,
-    fulfilledClaims: result.fulfilledClaims,
+    catalogUpdated: result.catalogUpdated,
     artifacts: result.artifacts.map((artifact) => ({
       id: artifact.id,
-      title: artifact.path,
       path: artifact.path,
       mimeType: artifact.mimeType,
       kind: artifact.kind,
       bytes: artifact.bytes,
-      agent: artifact.agent,
-      callId: artifact.callId,
     })),
-    usage: result.usage,
-    modelCalls: result.modelCalls,
-    toolExecutions: result.toolExecutions,
   };
 }
 
@@ -268,7 +230,6 @@ function failedDelegation(runId: string, action: DelegateAction, error: unknown)
     catalogUpdated: false,
     inputArtifacts: [],
     artifacts: [],
-    fulfilledClaims: [],
     error: message,
   };
 }
@@ -289,7 +250,7 @@ async function defaultDelegationRunner(
   return executeDelegation(runId, action, userId, { stageArtifacts });
 }
 
-/** Execute one same-response delegation batch with neutral bounded concurrency. */
+/** Execute one same-response delegation batch with bounded concurrency. */
 export async function executeDelegationBatch(
   runId: string,
   actions: readonly DelegateAction[],
@@ -322,11 +283,13 @@ export async function executeDelegationBatch(
 }
 
 /**
- * Run the dormant dynamic orchestration loop.
+ * Run the dynamic orchestration loop.
  *
- * Same-response delegates execute concurrently. Their compact summaries and
- * artifact references are correlated back to the model by function call id.
- * The model then chooses the next delegation round or finish.
+ * The model decides everything about decomposition, parallelism contents,
+ * corrections, and completion. The runtime is deterministic only at
+ * infrastructure boundaries: per-call validation with error feedback,
+ * bounded concurrency, workspace isolation, artifact identity, and a
+ * maximum round count.
  */
 export async function runDynamicOrchestrator(
   userPrompt: string,
@@ -336,45 +299,30 @@ export async function runDynamicOrchestrator(
   if (!userPrompt.trim()) throw new Error("user prompt is required");
   const runId = options.runId?.trim() || `run-${crypto.randomUUID()}`;
   const roles = dependencies.roles ?? loadRoles();
-  const workerDeployments = dependencies.workerDeployments ?? availableWorkers();
-  const orchestratorDeployment = options.orchestratorDeployment ?? PLANNER_DEPLOYMENT;
+  const roleDeployments = new Map(roles.map((role) => [role.name, role.defaultDeployment]));
+  const orchestratorDeployment = options.orchestratorDeployment ?? ORCHESTRATOR_DEPLOYMENT;
   const maxRounds = positiveInteger(options.maxRounds, DEFAULT_MAX_ROUNDS, "maxRounds");
-  const maxDelegates = positiveInteger(
-    options.maxDelegatesPerRound,
-    DEFAULT_MAX_DELEGATES_PER_ROUND,
-    "maxDelegatesPerRound",
-  );
-  if (!workerDeployments.includes(orchestratorDeployment)) {
-    throw new Error(`orchestrator deployment '${orchestratorDeployment}' is not worker-capable`);
-  }
 
   const modelCaller = dependencies.modelCaller ?? callLlm;
   const runner = dependencies.delegationRunner ?? defaultDelegationRunner;
   const registry = dependencies.pendingRegistryFactory?.(runId) ?? new PendingArtifactRegistry(runId);
   const stageArtifacts = options.stageArtifacts ?? registry.stageArtifacts;
-  const instructions = dynamicOrchestratorInstructions(roles, workerDeployments);
+  const skills = (() => {
+    try {
+      return (dependencies.skillCatalogue ?? listSkills)();
+    } catch {
+      return [];
+    }
+  })();
+  const instructions = orchestratorInstructions(roles, skills);
   const available = registry.list();
   const pendingContext = available.length === 0
     ? ""
-    : `\n\nPENDING ARTIFACTS AVAILABLE FROM EARLIER TURNS IN THIS CONVERSATION:\n${available.map((artifact) => `- ${artifact.id}: ${artifact.title} [${artifact.mimeType}, ${artifact.bytes} bytes]`).join("\n")}\nFor a save/catalogue follow-up, delegate the operator with the selected pending IDs. If no pending IDs are available, finish immediately with a clear explanation.`;
+    : `\n\nPENDING ARTIFACTS AVAILABLE FROM EARLIER TURNS IN THIS CONVERSATION:\n${available.map((artifact) => `- ${artifact.id}: ${artifact.title} [${artifact.mimeType}, ${artifact.bytes} bytes]`).join("\n")}`;
   const input: unknown[] = [{ role: "user", content: `${userPrompt}${pendingContext}` }];
-  const saveRequest = /\b(save|persist|catalog(?:ue)?|artifacts?\s*db|documents)\b/i.test(userPrompt);
-  if (saveRequest && available.length === 0) {
-    return {
-      ok: false,
-      runId,
-      response: "No pending artifacts are available in this conversation to save.",
-      rounds: [], delegations: [], artifacts: [], pendingArtifacts: [],
-      usage: { input: 0, output: 0 },
-      error: "No pending artifacts are available in this conversation to save.",
-    };
-  }
   const rounds: DynamicOrchestratorRound[] = [];
   const allDelegations: DelegationResult[] = [];
   const usage = { input: 0, output: 0 };
-  const seenCallIds = new Set<string>();
-  let lastNoProgressSignature = "";
-  let noProgressRepeats = 0;
 
   await emit(options.eventSink, { type: "orchestrator_start", runId });
 
@@ -390,26 +338,31 @@ export async function runDynamicOrchestrator(
       });
       usage.input += response.usage.input;
       usage.output += response.usage.output;
+      input.push(...response.rawOutput);
 
-      const verdict = validateOrchestratorCalls(response.functionCalls, {
-        agentNames: roles.map((role) => role.name),
-        workerDeployments,
-      });
-      if (!verdict.ok) {
-        throw new Error(`invalid orchestrator action batch: ${verdict.errors.join("; ")}`);
+      // Model produced no tool calls: nudge once per occurrence and continue.
+      if (response.functionCalls.length === 0) {
+        input.push({
+          role: "user",
+          content: "You produced no tool call. Respond with delegate, delegate_parallel, or finish.",
+        });
+        rounds.push({ round, actions: [], delegations: [], usage: response.usage });
+        continue;
       }
-      const duplicateCallIds = verdict.actions
-        .map((action) => action.callId)
-        .filter((callId) => seenCallIds.has(callId));
-      if (duplicateCallIds.length) {
-        throw new Error(`orchestrator reused call id(s): ${[...new Set(duplicateCallIds)].join(", ")}`);
+
+      const verdict = validateOrchestratorCalls(response.functionCalls, { roleDeployments });
+
+      // Per-call rejection feedback: the model sees each error and decides.
+      for (const rejection of verdict.rejections) {
+        input.push({
+          type: "function_call_output",
+          call_id: rejection.callId,
+          output: JSON.stringify({ ok: false, error: rejection.error }),
+        });
       }
-      verdict.actions.forEach((action) => seenCallIds.add(action.callId));
       await emit(options.eventSink, { type: "orchestrator_actions", runId, round, actions: verdict.actions });
 
-      const finish = verdict.actions[0]?.type === "finish"
-        ? verdict.actions[0] as FinishAction
-        : undefined;
+      const finish = verdict.actions.find((action): action is FinishAction => action.type === "finish");
       if (finish) {
         rounds.push({ round, actions: verdict.actions, delegations: [], usage: response.usage });
         await emit(options.eventSink, { type: "orchestrator_finish", runId, round, response: finish.response });
@@ -427,11 +380,12 @@ export async function runDynamicOrchestrator(
 
       const expanded = expandDelegations(verdict.actions);
       const delegates = expanded.delegates;
-      if (delegates.length > maxDelegates) {
-        throw new Error(`orchestrator emitted ${delegates.length} delegates; maximum per round is ${maxDelegates}`);
+      if (delegates.length === 0) {
+        // Nothing valid to execute this round; rejections above carry the reasons.
+        rounds.push({ round, actions: verdict.actions, delegations: [], usage: response.usage });
+        continue;
       }
 
-      input.push(...response.rawOutput);
       const results = await executeDelegationBatch(runId, delegates, {
         userId: options.userId,
         globalConcurrency: options.globalConcurrency,
@@ -439,37 +393,29 @@ export async function runDynamicOrchestrator(
         stageArtifacts,
         eventSink: options.eventSink,
       }, runner);
-      const registered = registry.register(results.flatMap((result) => result.artifacts));
-      const signature = JSON.stringify(delegates.map((action) => ({
-        agent: action.agent,
-        deployment: action.deployment,
-        task: action.task.trim().replace(/\s+/g, " "),
-        inputArtifactIds: [...action.inputArtifactIds].sort(),
-      })));
-      const verifiedPersistence = results.some((result) => result.catalogUpdated);
-      if (saveRequest && delegates.some((action) => action.agent === "operator") && !verifiedPersistence) {
-        throw new Error("artifact persistence failed: operator returned no verified catalog update");
-      }
-      const madeProgress = saveRequest ? verifiedPersistence : registered.length > 0 || verifiedPersistence;
-      if (!madeProgress && signature === lastNoProgressSignature) noProgressRepeats++;
-      else noProgressRepeats = madeProgress ? 0 : 1;
-      lastNoProgressSignature = signature;
-      if (noProgressRepeats >= 2) {
-        throw new Error("orchestrator stopped: repeated delegation batch produced no new artifacts or verified side effects");
-      }
+      registry.register(results.flatMap((result) => result.artifacts));
       allDelegations.push(...results);
       rounds.push({ round, actions: verdict.actions, delegations: results, usage: response.usage });
+
       if (expanded.parallel) {
+        const parallelCount = expanded.parallel.tasks.length;
         input.push({
           type: "function_call_output",
           call_id: expanded.parallel.callId,
           output: JSON.stringify({
-            results: expanded.parallel.tasks.map((task, index) => ({
-              taskId: task.taskId,
-              ...compactDelegationResult(results[index]),
+            results: results.slice(0, parallelCount).map((result, index) => ({
+              task: index,
+              ...compactDelegationResult(result),
             })),
           }),
         });
+        for (let index = parallelCount; index < delegates.length; index++) {
+          input.push({
+            type: "function_call_output",
+            call_id: delegates[index].callId,
+            output: JSON.stringify(compactDelegationResult(results[index])),
+          });
+        }
       } else {
         for (let index = 0; index < delegates.length; index++) {
           input.push({

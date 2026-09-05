@@ -149,7 +149,7 @@ function dynamicWireEvent(turn: ActiveTurn, event: DynamicOrchestratorEvent): vo
     case "orchestrator_actions": {
       const delegates = (event.actions ?? []).flatMap((action) =>
         action.type === "delegate" ? [action]
-          : action.type === "delegate_parallel" ? action.tasks.map((task) => ({ type: "delegate" as const, callId: `${action.callId}:${task.taskId}`, ...task }))
+          : action.type === "delegate_parallel" ? action.tasks.map((task, index) => ({ type: "delegate" as const, callId: `${action.callId}:${index}`, ...task }))
             : [],
       );
       if (delegates.length > 0) {

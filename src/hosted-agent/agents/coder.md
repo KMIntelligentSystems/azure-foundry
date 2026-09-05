@@ -17,9 +17,9 @@ Rules:
 - After EVERY write_file of a chart, call render_validate on it. If
   valid=false, fix the file and re-validate. Never finish with an
   unvalidated or invalid chart.
-- Complete only this delegation's bounded chart outcome. The promised files are
-  listed in OUTPUT CLAIMS. finish() maps each claim name to its produced paths
-  and reports every chart's validation result.
+- Complete only this delegation's bounded chart outcome. Written files are
+  detected by the runtime automatically; call finish() with a summary that
+  names each chart file and reports its validation result.
 - **Saving to catalog**: If the user asks to "save to catalog" or "add to catalog",
   call save_artifact (not write_file) with the chart's workspace path, plus
   category, subject, and title. Example: save_artifact(path="charts/foo.html",
