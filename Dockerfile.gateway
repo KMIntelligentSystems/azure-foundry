@@ -4,9 +4,9 @@ FROM node:24-bookworm AS build
 WORKDIR /src
 COPY package*.json ./
 RUN npm ci
-COPY tsconfig.json tsconfig.agent.json ./
+COPY tsconfig.json ./
 COPY src ./src
-RUN npx tsc -p tsconfig.agent.json
+RUN npx tsc
 
 FROM node:24-bookworm
 WORKDIR /app
@@ -16,6 +16,7 @@ RUN apt-get update \
  && pip3 install --break-system-packages --no-cache-dir \
       numpy==1.26.4 pandas==2.2.2 statsmodels==0.14.6 scikit-learn==1.5.2
 COPY --from=build /src/dist ./dist
+# Copy agent roles and skills for runtime loading
 COPY src/hosted-agent/agents ./dist/hosted-agent/agents
 COPY src/hosted-agent/skills ./dist/hosted-agent/skills
 COPY --from=build /src/node_modules ./node_modules

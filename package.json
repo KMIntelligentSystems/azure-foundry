@@ -11,7 +11,6 @@
     "sample:streaming": "tsx src/samples/streaming.ts",
     "sample:agent": "tsx src/samples/agent.ts",
     "start:gateway": "tsx src/aca-gateway/server.ts",
-    "start:agent": "tsx src/hosted-agent/server.ts",
     "test:architecture": "tsx scripts/smoke-architecture.ts",
     "test:orchestrator-protocol": "tsx scripts/test-orchestrator-protocol.ts",
     "test:delegate-executor": "tsx scripts/test-delegate-executor.ts",
@@ -39,7 +38,7 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
 }
