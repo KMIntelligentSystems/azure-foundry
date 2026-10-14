@@ -52,6 +52,15 @@ observations without redefining the cutoff contract.
 
 ## 3. Stage data through `execute_python`
 
+This interactive runtime is separate from the unattended Rust airlock. The
+Rust airlock owns its ACA managed identity and passes only a derived Foundry
+bearer to its oracle child; this skill does not use that workload identity.
+
+The runtime reaches artifact-service with the user's delegated MSAL bearer
+token. Artifact-service verifies the token and derives identity/admin claims;
+`X-User-Id` and `X-User-Role` are intentionally unsupported and must never be
+reintroduced as a fallback.
+
 For any value-level operation, call `execute_python` with
 `stage_indicator_panel`. Name only the series required by the question.
 

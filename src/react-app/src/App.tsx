@@ -3,17 +3,17 @@ import { ThinkingPanel } from "./components/ThinkingPanel";
 import { ConversationPanel } from "./components/ConversationPanel";
 import { SimpleCatalogTree } from "./components/SimpleCatalogTree";
 import { runSynchronousTurn, type AgentWireEvent, type OrchestratorResult } from "./lib/agent-bridge";
-import { acquireGatewayToken, currentUser, signIn, signOut } from "./lib/auth";
+import { acquireArtifactToken, acquireGatewayToken, currentUser, signIn, signOut } from "./lib/auth";
 import "./App.css";
 
 const ARTIFACT_SERVICE = "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
 
 /**
- * Fetches artifact content WITH the X-User-Id header (iframes can't send
- * headers, and the service 401s without it), then displays it: HTML via a
- * blob: URL iframe, everything else as text.
+ * Fetches artifact content with an MSAL bearer token (iframes cannot attach
+ * Authorization), then displays it: HTML via a blob URL iframe and everything
+ * else as text. Identity is derived by artifact-service from the verified JWT.
  */
-function ArtifactViewer({ artifact, userId }: { artifact: CatalogArtifact; userId: string }) {
+function ArtifactViewer({ artifact }: { artifact: CatalogArtifact }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -25,7 +25,8 @@ function ArtifactViewer({ artifact, userId }: { artifact: CatalogArtifact; userI
     setText(null);
     setErr(null);
     const src = artifact.url.startsWith("http") ? artifact.url : `${ARTIFACT_SERVICE}${artifact.url}`;
-    fetch(src, { headers: { "X-User-Id": userId } })
+    acquireArtifactToken()
+      .then((token) => fetch(src, { headers: { Authorization: `Bearer ${token}` } }))
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = await res.text();
@@ -42,7 +43,7 @@ function ArtifactViewer({ artifact, userId }: { artifact: CatalogArtifact; userI
       cancelled = true;
       if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [artifact.id, artifact.url, artifact.mime_type, userId]);
+  }, [artifact.id, artifact.url, artifact.mime_type]);
 
   if (err) return <p style={{ color: "#f78166" }}>Failed to load artifact: {err}</p>;
   if (blobUrl) {
@@ -107,12 +108,10 @@ function FoundryApp() {
   const [result, setResult] = useState<OrchestratorResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  // UI identity state. In production the ACA gateway is authoritative: it
-  // verifies the Entra access token and derives the user id from its claims.
-  // `ALLOW_INSECURE_USER_ID=true` permits this manual form only for local dev.
-  // Artifact-service IDs are normalized to lowercase at the UI boundary.
+  // UI identity is display/state only. Both ACA gateway and artifact-service
+  // verify their own MSAL bearer token and derive immutable user id + roles
+  // from claims. Never restore client-authored X-User-Id/X-User-Role headers.
   const [userId, setUserId] = useState("");
-  const [userRole] = useState<"admin" | "user">("admin");
   const [authReady, setAuthReady] = useState(false);
   const [selectedArtifact, setSelectedArtifact] = useState<CatalogArtifact | null>(null);
   // Bumped after every completed orchestrator turn so the catalog tree
@@ -229,8 +228,8 @@ function FoundryApp() {
       const data = await runSynchronousTurn({
         conversationId,
         promptText: prompt,
-        userId,
         accessToken: await acquireGatewayToken(),
+        artifactAccessToken: await acquireArtifactToken(),
         onEvent: handleWireEvent,
       });
       setResult(data);
@@ -321,8 +320,8 @@ function FoundryApp() {
     <div className="app-shell">
       <nav className="navbar">
         <span className="brand">Foundry Orchestrator</span>
-        <span className="user-pill" title={`Logged in as ${userId} (${userRole})`}>
-          {userRole === "admin" ? "🔧" : "👤"} {userId}
+        <span className="user-pill" title={`Logged in as ${userId}`}>
+          👤 {userId}
         </span>
         <button
           onClick={handleLogout}
@@ -385,8 +384,6 @@ function FoundryApp() {
 
       <aside className="sidebar">
         <SimpleCatalogTree
-          userId={userId}
-          isAdmin={userRole === "admin"}
           onSelect={handleSelectArtifact}
           refreshKey={catalogRefreshKey}
         />
@@ -512,7 +509,7 @@ function FoundryApp() {
             <p style={{ color: "#8b949e", marginBottom: "1rem" }}>
               {selectedArtifact.category} / {selectedArtifact.subject} • {selectedArtifact.mime_type}
             </p>
-            <ArtifactViewer artifact={selectedArtifact} userId={userId} />
+            <ArtifactViewer artifact={selectedArtifact} />
           </div>
         )}
 

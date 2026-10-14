@@ -88,6 +88,7 @@ const server = http.createServer(async (req, res) => {
       const result = await runDynamicOrchestrator(prompt, {
         runId: conversationId, // conversation owns pending artifacts across follow-up turns
         userId: typeof body?.["user_id"] === "string" ? (body["user_id"] as string) : undefined,
+        accessToken: typeof body?.["access_token"] === "string" ? (body["access_token"] as string) : undefined,
       });
       // The banner carries the platform-injected version so callers can
       // verify which agent version answered (FOUNDRY_AGENT_VERSION is set by

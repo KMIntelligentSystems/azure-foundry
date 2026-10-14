@@ -121,10 +121,21 @@ function artifactServiceUrl(): string {
     "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
 }
 
+export interface ToolSecurityContext {
+  userId?: string;
+  /** Verified user-delegated token. Never place this value in model context. */
+  accessToken?: string;
+}
+
+function artifactHeaders(ctx?: ToolSecurityContext): Record<string, string> {
+  if (!ctx?.accessToken) throw new Error("artifact-service access requires a delegated Entra token");
+  return { Authorization: `Bearer ${ctx.accessToken}` };
+}
+
 async function saveArtifactToCatalog(
   args: Record<string, unknown>,
   ws: string,
-  userId: string,
+  ctx: ToolSecurityContext,
 ): Promise<ToolResult> {
   const path = String(args["path"] ?? "");
   const category = String(args["category"] ?? "");
@@ -159,8 +170,8 @@ async function saveArtifactToCatalog(
     const uploadRes = await fetch(`${artifactServiceUrl()}/artifacts/upload`, {
       method: "POST",
       headers: {
+        ...artifactHeaders(ctx),
         "Content-Type": "application/octet-stream",
-        "X-User-Id": userId,
         "X-File-Name": path.split("/").pop() ?? "artifact",
         "X-Mime-Type": mimeType,
       },
@@ -175,9 +186,10 @@ async function saveArtifactToCatalog(
     const saveRes = await fetch(`${artifactServiceUrl()}/artifacts`, {
       method: "POST",
       headers: {
+        ...artifactHeaders(ctx),
         "Content-Type": "application/json",
-        "X-User-Id": userId,
-        "X-User-Role": "user", // orchestrator acts as the user who prompted
+        // REMOVED: X-User-Id/X-User-Role. artifact-service derives both from
+        // the verified bearer token; caller-authored identity is forgeable.
       },
       body: JSON.stringify({ category, subject, title, mimeType, url, tags }),
     });
@@ -194,8 +206,9 @@ async function saveArtifactToCatalog(
 async function persistArtifactBundle(
   args: Record<string, unknown>,
   ws: string,
-  userId: string,
+  ctx: ToolSecurityContext,
 ): Promise<ToolResult> {
+  const userId = ctx.userId ?? "unknown";
   const category = String(args["category"] ?? "").trim();
   const subject = String(args["subject"] ?? "").trim();
   const tags = args["tags"] == null ? undefined : String(args["tags"]);
@@ -219,7 +232,7 @@ async function persistArtifactBundle(
   let existing: CatalogEntry[] = [];
   try {
     const list = await fetch(`${artifactServiceUrl()}/artifacts`, {
-      headers: { "X-User-Id": userId, "X-User-Role": userId === "admin" ? "admin" : "user" },
+      headers: artifactHeaders(ctx),
     });
     if (list.ok) existing = ((await list.json()) as { artifacts?: CatalogEntry[] }).artifacts ?? [];
   } catch { /* individual post-save verification still protects correctness */ }
@@ -234,7 +247,7 @@ async function persistArtifactBundle(
       persisted.push({ path: file.path, title: file.title, artifactId: prior.id, url: prior.url, status: "existing" });
       continue;
     }
-    const result = await saveArtifactToCatalog({ path: file.path, title: file.title, category, subject, tags }, ws, userId);
+    const result = await saveArtifactToCatalog({ path: file.path, title: file.title, category, subject, tags }, ws, ctx);
     if (!result.ok) {
       failed.push({ path: file.path, reason: result.error?.message ?? "save failed" });
       continue;
@@ -245,7 +258,7 @@ async function persistArtifactBundle(
       continue;
     }
     const verify = await fetch(`${artifactServiceUrl()}/artifacts/${encodeURIComponent(saved.artifactId)}`, {
-      headers: { "X-User-Id": userId, "X-User-Role": userId === "admin" ? "admin" : "user" },
+      headers: artifactHeaders(ctx),
     });
     if (!verify.ok) {
       failed.push({ path: file.path, reason: `post-save catalog verification HTTP ${verify.status}` });
@@ -289,10 +302,10 @@ function resolveContentUrl(url: string): string {
   return url.startsWith("http") ? url : `${artifactServiceUrl()}${url}`;
 }
 
-async function listArtifactsFromCatalog(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+async function listArtifactsFromCatalog(args: Record<string, unknown>, ctx: ToolSecurityContext): Promise<ToolResult> {
   try {
     const res = await fetch(`${artifactServiceUrl()}/artifacts`, {
-      headers: { "X-User-Id": userId },
+      headers: artifactHeaders(ctx),
     });
     if (!res.ok) {
       return err("list_failed", `artifact service list: HTTP ${res.status}`);
@@ -327,19 +340,19 @@ async function listArtifactsFromCatalog(args: Record<string, unknown>, userId: s
   }
 }
 
-async function readArtifactContent(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+async function readArtifactContent(args: Record<string, unknown>, ctx: ToolSecurityContext): Promise<ToolResult> {
   const id = String(args["artifact_id"] ?? "");
   if (!id) return err("invalid_args", "artifact_id is required");
   try {
     const metaRes = await fetch(`${artifactServiceUrl()}/artifacts/${encodeURIComponent(id)}`, {
-      headers: { "X-User-Id": userId },
+      headers: artifactHeaders(ctx),
     });
     if (!metaRes.ok) {
       return err("not_found", `artifact service get: HTTP ${metaRes.status}`);
     }
     const meta = (await metaRes.json()) as CatalogEntry;
     const contentUrl = resolveContentUrl(meta.url);
-    const contentRes = await fetch(contentUrl, { headers: { "X-User-Id": userId } });
+    const contentRes = await fetch(contentUrl, { headers: artifactHeaders(ctx) });
     if (!contentRes.ok) {
       return err("fetch_failed", `artifact content fetch: HTTP ${contentRes.status}`);
     }
@@ -392,7 +405,7 @@ interface StagedPanel {
 async function stageIndicatorPanel(
   request: PanelStageRequest,
   ws: string,
-  userId: string,
+  ctx: ToolSecurityContext,
 ): Promise<{ ok: true; staged: StagedPanel } | { ok: false; error: ToolResult }> {
   const rel = String(request.path ?? "");
   const series = Array.isArray(request.series) ? request.series.map(String) : [];
@@ -408,9 +421,8 @@ async function stageIndicatorPanel(
     const res = await fetch(`${artifactServiceUrl()}/refresh-panel`, {
       method: "POST",
       headers: {
+        ...artifactHeaders(ctx),
         "Content-Type": "application/json",
-        "X-User-Id": userId,
-        "X-User-Role": "admin",
       },
       body: JSON.stringify({ subject: request.subject ?? null, series }),
     });
@@ -462,13 +474,13 @@ async function stageIndicatorPanel(
 async function runPython(
   code: string,
   ws: string,
-  ctx?: { userId?: string },
+  ctx?: ToolSecurityContext,
   stageRequest?: PanelStageRequest | null,
 ): Promise<ToolResult> {
   if (code.length > PY_MAX_CHARS) return err("invalid_args", `code over ${PY_MAX_CHARS} chars`);
   let stagedInput: StagedPanel | undefined;
   if (stageRequest) {
-    const stage = await stageIndicatorPanel(stageRequest, ws, ctx?.userId ?? "unknown");
+    const stage = await stageIndicatorPanel(stageRequest, ws, ctx ?? {});
     if (!stage.ok) return stage.error;
     stagedInput = stage.staged;
   }
@@ -641,7 +653,7 @@ async function renderValidate(htmlPath: string): Promise<ToolResult> {
 
 interface ToolDef {
   spec: ToolSpec;
-  run: (args: Record<string, unknown>, ws: string, ctx?: { userId?: string }) => ToolResult | Promise<ToolResult>;
+  run: (args: Record<string, unknown>, ws: string, ctx?: ToolSecurityContext) => ToolResult | Promise<ToolResult>;
 }
 
 const CATALOG: Record<string, ToolDef> = {
@@ -815,7 +827,7 @@ const CATALOG: Record<string, ToolDef> = {
         additionalProperties: false,
       },
     },
-    run: async (a, _ws, ctx) => listArtifactsFromCatalog(a, ctx?.userId ?? "unknown"),
+    run: async (a, _ws, ctx) => listArtifactsFromCatalog(a, ctx ?? {}),
   },
   read_artifact: {
     spec: {
@@ -832,7 +844,7 @@ const CATALOG: Record<string, ToolDef> = {
         additionalProperties: false,
       },
     },
-    run: async (a, _ws, ctx) => readArtifactContent(a, ctx?.userId ?? "unknown"),
+    run: async (a, _ws, ctx) => readArtifactContent(a, ctx ?? {}),
   },
   save_artifact: {
     spec: {
@@ -855,7 +867,7 @@ const CATALOG: Record<string, ToolDef> = {
         additionalProperties: false,
       },
     },
-    run: async (a, ws, ctx) => saveArtifactToCatalog(a, ws, ctx?.userId ?? "unknown"),
+    run: async (a, ws, ctx) => saveArtifactToCatalog(a, ws, ctx ?? {}),
   },
   persist_artifacts: {
     spec: {
@@ -888,7 +900,7 @@ const CATALOG: Record<string, ToolDef> = {
         additionalProperties: false,
       },
     },
-    run: async (a, ws, ctx) => persistArtifactBundle(a, ws, ctx?.userId ?? "unknown"),
+    run: async (a, ws, ctx) => persistArtifactBundle(a, ws, ctx ?? {}),
   },
   sync_indicator_history: {
     spec: {
@@ -913,11 +925,10 @@ const CATALOG: Record<string, ToolDef> = {
       const res = await fetch(`${artifactServiceUrl()}/refresh-sync`, {
         method: "POST",
         headers: {
+          ...artifactHeaders(ctx),
           "Content-Type": "application/json",
-          "X-User-Id": ctx?.userId ?? "unknown",
-          // refresh-sync is a privileged system verb — the artifact-service
-          // route accepts admin role only for this one path.
-          "X-User-Role": "admin",
+          // Admin authorization is an Entra app-role/object-id decision made
+          // by artifact-service, never a caller-authored role header.
         },
         body: JSON.stringify({ dryRun: a["dryRun"] === true }),
       });
@@ -956,9 +967,8 @@ const CATALOG: Record<string, ToolDef> = {
       const res = await fetch(`${artifactServiceUrl()}/refresh-panel`, {
         method: "POST",
         headers: {
+          ...artifactHeaders(ctx),
           "Content-Type": "application/json",
-          "X-User-Id": ctx?.userId ?? "unknown",
-          "X-User-Role": "admin",
         },
         body: JSON.stringify({ subject: a["subject"] ?? null, series: a["series"] ?? [] }),
       });
@@ -1070,10 +1080,14 @@ export async function dispatch(
   args: Record<string, unknown>,
   allowed: readonly string[],
   ws: string,
-  ctx?: { userId?: string },
+  ctx?: ToolSecurityContext,
 ): Promise<ToolResult> {
   if (!allowed.includes(toolName)) return err("unknown_tool", `tool not granted to this role: ${toolName}`);
-  return await CATALOG[toolName].run(args, ws, ctx);
+  try {
+    return await CATALOG[toolName].run(args, ws, ctx);
+  } catch (error) {
+    return err("authentication_required", error instanceof Error ? error.message : String(error));
+  }
 }
 
 // ── runRole — one step's tool loop ────────────────────────────────────────
@@ -1100,7 +1114,7 @@ export async function runRole(
   task: string,
   upstreamText: string,
   conversationId: string,
-  ctx?: { userId?: string },
+  ctx?: ToolSecurityContext,
   round = 1,
   modelCaller: typeof callLlm = callLlm,
 ): Promise<RoleRunResult> {

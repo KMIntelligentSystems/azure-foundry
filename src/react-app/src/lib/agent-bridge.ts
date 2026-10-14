@@ -52,17 +52,17 @@ export interface OrchestratorResult {
 export const artifactEvents = new EventTarget();
 
 function gatewayUrl(): string {
-  const configured = (import.meta.env.VITE_AGENT_WS_URL as string | undefined)?.trim();
+  const configured = (import.meta.env.VITE_AGENT_WS_URL as string | undefined)?.trim(); //React app wss://foundry-orchestrator-gateway.bravesea-f16a8310.eastus.azurecontainerapps.io/ws/agent
   if (configured) return configured;
-  if (import.meta.env.DEV) return "ws://localhost:8080/ws/agent";
+  if (import.meta.env.DEV) return "ws://localhost:8080/ws/agent";  
   throw new Error("VITE_AGENT_WS_URL is not configured for the ACA orchestrator gateway");
 }
 
 export function runSynchronousTurn(options: {
   conversationId: string;
   promptText: string;
-  userId: string;
   accessToken?: string;
+  artifactAccessToken?: string;
   onEvent: (event: AgentWireEvent) => void;
 }): Promise<OrchestratorResult> {
   return new Promise((resolve, reject) => {
@@ -93,14 +93,16 @@ export function runSynchronousTurn(options: {
       type: "resume",
       conversation_id: options.conversationId,
       after_event: receivedMessages,
-      user_id: options.userId,
+      // No user_id is sent: the gateway derives identity from the verified
+      // Entra token. Caller-provided identity is never authoritative.
       access_token: options.accessToken ?? null,
+      artifact_access_token: options.artifactAccessToken ?? null,
     } : {
       type: "prompt",
       conversation_id: options.conversationId,
       promptText: options.promptText,
-      user_id: options.userId,
       access_token: options.accessToken ?? null,
+      artifact_access_token: options.artifactAccessToken ?? null,
     });
 
     const connect = () => {

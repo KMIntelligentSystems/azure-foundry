@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { acquireArtifactToken } from "../lib/auth";
 
 export interface Artifact {
   id: string;
@@ -13,8 +14,6 @@ export interface Artifact {
 }
 
 interface CatalogTreeProps {
-  userId: string;
-  isAdmin: boolean;
   onSelect: (artifact: Artifact) => void;
   onDelete?: (id: string) => void;
   /** Bump to force a re-fetch (e.g. after an orchestrator turn). */
@@ -23,7 +22,7 @@ interface CatalogTreeProps {
 
 const API_BASE = "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
 
-export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete, refreshKey }: CatalogTreeProps) {
+export function SimpleCatalogTree({ onSelect, onDelete, refreshKey }: CatalogTreeProps) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,11 +31,9 @@ export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete, refresh
     setLoading(true);
     setError(null);
     try {
+      const token = await acquireArtifactToken();
       const res = await fetch(`${API_BASE}/artifacts`, {
-        headers: {
-          "X-User-Id": userId,
-          "X-User-Role": isAdmin ? "admin" : "user",
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -49,8 +46,8 @@ export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete, refresh
   };
 
   useEffect(() => {
-    if (userId) fetchArtifacts();
-  }, [userId, isAdmin, refreshKey]);
+    void fetchArtifacts();
+  }, [refreshKey]);
 
   // Group by category → subject
   const tree = artifacts.reduce<Record<string, Record<string, Artifact[]>>>((acc, a) => {
@@ -64,12 +61,10 @@ export function SimpleCatalogTree({ userId, isAdmin, onSelect, onDelete, refresh
     e.stopPropagation();
     if (!confirm("Delete this artifact?")) return;
     try {
+      const token = await acquireArtifactToken();
       const res = await fetch(`${API_BASE}/artifacts/${id}`, {
         method: "DELETE",
-        headers: {
-          "X-User-Id": userId,
-          "X-User-Role": isAdmin ? "admin" : "user",
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await fetchArtifacts();
