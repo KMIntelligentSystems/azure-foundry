@@ -19,6 +19,9 @@ const ALLOWED_ORIGINS = (process.env["ALLOWED_ORIGINS"] ?? "")
 const ALLOW_INSECURE_USER_ID = process.env["ALLOW_INSECURE_USER_ID"] === "true";
 const CLIENT_ID = process.env["ACA_GATEWAY_CLIENT_ID"] ?? "";
 const TENANT_ID = process.env["ENTRA_TENANT_ID"] ?? "";
+const REQUIRED_SCOPE = process.env["ACA_GATEWAY_SCOPE"] ?? "access_as_user";
+const ALLOWED_CLIENT_IDS = new Set((process.env["ACA_ALLOWED_CLIENT_IDS"] ?? "")
+  .split(",").map((value) => value.trim().toLowerCase()).filter(Boolean));
 const ADMIN_OBJECT_IDS = new Set((process.env["ADMIN_OBJECT_IDS"] ?? "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean));
 const OPENID_CONFIG = process.env["OPENID_CONFIG_URL"] ?? `https://login.microsoftonline.com/${TENANT_ID || "common"}/v2.0/.well-known/openid-configuration`;
 
@@ -26,16 +29,20 @@ interface PromptMessage {
   type: "prompt";
   conversation_id?: string;
   promptText: string;
+  /** Local-only compatibility input; ignored unless ALLOW_INSECURE_USER_ID=true. */
   user_id?: string;
   access_token?: string;
+  artifact_access_token?: string;
 }
 
 interface ResumeMessage {
   type: "resume";
   conversation_id: string;
   after_event?: number;
+  /** Local-only compatibility input; ignored unless ALLOW_INSECURE_USER_ID=true. */
   user_id?: string;
   access_token?: string;
+  artifact_access_token?: string;
 }
 
 type ClientMessage = PromptMessage | ResumeMessage;
@@ -75,6 +82,8 @@ async function signingKeys(): Promise<Jwk[]> {
 
 async function authenticate(message: Pick<PromptMessage, "user_id" | "access_token">): Promise<AuthenticatedUser> {
   if (ALLOW_INSECURE_USER_ID) {
+    // Explicit local-development escape hatch only. Production derives the
+    // principal exclusively from the verified Entra token below.
     const id = String(message.user_id ?? "").trim().toLowerCase();
     if (!id) throw new Error("user_id is required in insecure local mode");
     return { id, claims: {} };
@@ -95,6 +104,7 @@ async function authenticate(message: Pick<PromptMessage, "user_id" | "access_tok
   if (!verified) throw new Error("invalid access_token signature");
   const now = Math.floor(Date.now() / 1000);
   if (typeof claims["exp"] !== "number" || claims["exp"] <= now) throw new Error("access_token expired");
+  if (typeof claims["nbf"] === "number" && claims["nbf"] > now + 60) throw new Error("access_token is not active");
   if (claims["tid"] !== TENANT_ID) throw new Error("access_token tenant mismatch");
   const acceptedIssuers = new Set([`https://login.microsoftonline.com/${TENANT_ID}/v2.0`, `https://sts.windows.net/${TENANT_ID}/`]);
   if (typeof claims["iss"] !== "string" || !acceptedIssuers.has(claims["iss"])) throw new Error("access_token issuer mismatch");
@@ -104,11 +114,15 @@ async function authenticate(message: Pick<PromptMessage, "user_id" | "access_tok
       !(Array.isArray(aud) && aud.some((value) => typeof value === "string" && acceptedAudiences.has(value)))) {
     throw new Error("access_token audience mismatch");
   }
+  const scopes = String(claims["scp"] ?? "").split(/\s+/).filter(Boolean);
+  if (!scopes.includes(REQUIRED_SCOPE)) throw new Error(`access_token lacks required scope '${REQUIRED_SCOPE}'`);
+  const authorizedParty = String(claims["azp"] ?? claims["appid"] ?? "").trim().toLowerCase();
+  if (ALLOWED_CLIENT_IDS.size > 0 && !ALLOWED_CLIENT_IDS.has(authorizedParty)) {
+    throw new Error("access_token client application is not allowed");
+  }
   const objectId = String(claims["oid"] ?? "").trim().toLowerCase();
-  const id = ADMIN_OBJECT_IDS.has(objectId)
-    ? "admin"
-    : String(claims["preferred_username"] ?? objectId ?? claims["sub"] ?? "").trim().toLowerCase();
-  if (!id) throw new Error("access_token has no stable user identity");
+  if (!objectId) throw new Error("access_token lacks stable oid identity claim");
+  const id = ADMIN_OBJECT_IDS.has(objectId) ? "admin" : `${TENANT_ID}:${objectId}`.toLowerCase();
   return { id, claims };
 }
 
@@ -186,6 +200,9 @@ function dynamicWireEvent(turn: ActiveTurn, event: DynamicOrchestratorEvent): vo
       break;
     case "orchestrator_error":
       publish(turn, { type: "agent_event", event: { type: "agent_error", conversationId, error: event.error ?? "dynamic orchestrator failed" } });
+      break;
+    case "catalog_updated":
+      publish(turn, { type: "agent_event", event: { type: "catalog_updated", conversationId } });
       break;
   }
 }
@@ -297,6 +314,9 @@ sockets.on("connection", (socket, request) => {
       void runDynamicOrchestrator(message.promptText, {
         runId,
         userId: user.id,
+        // Audience-specific artifact token; forwarded only to the first-party
+        // artifact HTTP client, never to model prompts or Python children.
+        accessToken: String(message.artifact_access_token ?? ""),
         eventSink: (event) => dynamicWireEvent(turn, event),
       }).then((dynamic) => {
         const result = {

@@ -58,6 +58,7 @@ async function executeStep(
   conversationId: string,
   round: number,
   userId?: string,
+  accessToken?: string,
 ): Promise<StepResult> {
   const role = getRole(step.role);
   if (!role) throw new Error(`role '${step.role}' vanished after validation`);
@@ -66,7 +67,7 @@ async function executeStep(
     : upstream.map((u) => `--- round ${u.round}: ${u.role} ---\n${u.output.slice(0, MAX_STEP_OUTPUT_CHARS)}`).join("\n");
   const res = await runRole(
     role, step.deployment, step.task, upstreamText, conversationId,
-    { userId }, round,
+    { userId, accessToken }, round,
   );
   return {
     role: step.role, deployment: step.deployment, task: step.task,
@@ -103,9 +104,10 @@ function planningPrompt(prompt: string, session: SessionState): string {
 export async function orchestrate(
   prompt: string,
   conversationId?: string,
-  userId?: string,
+  security: { userId?: string; accessToken?: string } = {},
   eventSink?: AgentEventSink,
 ): Promise<OrchestratorResult> {
+  const { userId, accessToken } = security;
   const totals = { input: 0, output: 0 };
   const id = conversationId && conversationId.trim() ? conversationId : `anon-${Date.now()}`;
   const session = loadSession(id);
@@ -159,7 +161,7 @@ export async function orchestrate(
           type: "step_start", conversationId: id, round, index,
           role: step.role, deployment: step.deployment, task: step.task,
         });
-        const result = await executeStep(step, steps, id, round, userId);
+        const result = await executeStep(step, steps, id, round, userId, accessToken);
         totals.input += result.usage.input;
         totals.output += result.usage.output;
         steps.push(result);
@@ -179,7 +181,7 @@ export async function orchestrate(
       if (!verdict.plan.continuePlanning) {
         const completed = steps.every((step) => step.terminatedBy !== "limit");
         record(session, prompt, plans, steps, totals, completed);
-        const artifacts = await collectArtifacts(id, userId);
+        const artifacts = await collectArtifacts(id, accessToken);
         const response = formatResponse(plans, validationErrors, steps, artifacts);
         await emit(eventSink, { type: "agent_end", conversationId: id, ok: completed });
         return {
@@ -202,7 +204,7 @@ export async function orchestrate(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     record(session, prompt, plans, steps, totals, false);
-    const artifacts = await collectArtifacts(id, userId);
+    const artifacts = await collectArtifacts(id, accessToken);
     await emit(eventSink, { type: "agent_error", conversationId: id, error: message });
     await emit(eventSink, { type: "agent_end", conversationId: id, ok: false });
     return {

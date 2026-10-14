@@ -23,7 +23,8 @@ export interface DynamicOrchestratorEvent {
     | "delegation_start"
     | "delegation_end"
     | "orchestrator_finish"
-    | "orchestrator_error";
+    | "orchestrator_error"
+    | "catalog_updated";
   runId: string;
   round?: number;
   action?: DelegateAction;
@@ -59,6 +60,8 @@ export interface DynamicOrchestratorResult {
 export interface DynamicOrchestratorOptions {
   runId?: string;
   userId?: string;
+  /** User-delegated Entra token forwarded only to authenticated first-party APIs. */
+  accessToken?: string;
   maxRounds?: number;
   globalConcurrency?: number;
   perDeploymentConcurrency?: number;
@@ -71,6 +74,7 @@ export type DelegationRunner = (
   runId: string,
   action: DelegateAction,
   userId?: string,
+  accessToken?: string,
   stageArtifacts?: DelegationArtifactStager,
 ) => Promise<DelegationResult>;
 
@@ -245,16 +249,17 @@ async function defaultDelegationRunner(
   runId: string,
   action: DelegateAction,
   userId?: string,
+  accessToken?: string,
   stageArtifacts?: DelegationArtifactStager,
 ): Promise<DelegationResult> {
-  return executeDelegation(runId, action, userId, { stageArtifacts });
+  return executeDelegation(runId, action, { userId, accessToken }, { stageArtifacts });
 }
 
 /** Execute one same-response delegation batch with bounded concurrency. */
 export async function executeDelegationBatch(
   runId: string,
   actions: readonly DelegateAction[],
-  options: Pick<DynamicOrchestratorOptions, "userId" | "globalConcurrency" | "perDeploymentConcurrency" | "stageArtifacts" | "eventSink"> = {},
+  options: Pick<DynamicOrchestratorOptions, "userId" | "accessToken" | "globalConcurrency" | "perDeploymentConcurrency" | "stageArtifacts" | "eventSink"> = {},
   runner: DelegationRunner = defaultDelegationRunner,
 ): Promise<DelegationResult[]> {
   const globalLimit = positiveInteger(options.globalConcurrency, DEFAULT_GLOBAL_CONCURRENCY, "globalConcurrency");
@@ -269,7 +274,7 @@ export async function executeDelegationBatch(
   const settled = await Promise.allSettled(actions.map((action) =>
     forDeployment(action.deployment).use(() => globalSemaphore.use(async () => {
       await emit(options.eventSink, { type: "delegation_start", runId, action });
-      const result = await runner(runId, action, options.userId, options.stageArtifacts);
+      const result = await runner(runId, action, options.userId, options.accessToken, options.stageArtifacts);
       await emit(options.eventSink, { type: "delegation_end", runId, action, result });
       return result;
     })),
@@ -388,6 +393,7 @@ export async function runDynamicOrchestrator(
 
       const results = await executeDelegationBatch(runId, delegates, {
         userId: options.userId,
+        accessToken: options.accessToken,
         globalConcurrency: options.globalConcurrency,
         perDeploymentConcurrency: options.perDeploymentConcurrency,
         stageArtifacts,
@@ -395,6 +401,13 @@ export async function runDynamicOrchestrator(
       }, runner);
       registry.register(results.flatMap((result) => result.artifacts));
       allDelegations.push(...results);
+
+      // Emit catalog_updated event if any delegation persisted artifacts
+      const anyCatalogUpdated = results.some((r) => r.catalogUpdated);
+      if (anyCatalogUpdated) {
+        await emit(options.eventSink, { type: "catalog_updated", runId, round });
+      }
+
       rounds.push({ round, actions: verdict.actions, delegations: results, usage: response.usage });
 
       if (expanded.parallel) {

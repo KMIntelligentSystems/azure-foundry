@@ -43,15 +43,17 @@ function mimeTypeFor(file: string): string {
   return "application/octet-stream";
 }
 
-async function uploadPending(fullPath: string, relativePath: string, mimeType: string, userId: string): Promise<string | undefined> {
+async function uploadPending(fullPath: string, relativePath: string, mimeType: string, accessToken: string): Promise<string | undefined> {
   const service = process.env["ARTIFACT_SERVICE_URL"] ??
     "https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io";
   try {
     const response = await fetch(`${service}/artifacts/upload`, {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/octet-stream",
-        "X-User-Id": userId,
+        // REMOVED: X-User-Id. artifact-service derives ownership from the
+        // verified Entra token, never from a caller-controlled header.
         "X-File-Name": path.basename(relativePath),
         "X-Mime-Type": mimeType,
       },
@@ -65,7 +67,7 @@ async function uploadPending(fullPath: string, relativePath: string, mimeType: s
   }
 }
 
-export async function collectArtifacts(conversationId: string, userId?: string): Promise<ArtifactRef[]> {
+export async function collectArtifacts(conversationId: string, accessToken?: string): Promise<ArtifactRef[]> {
   const ws = workspaceRoot(conversationId);
   if (!fs.existsSync(ws)) return [];
   const walk = (d: string): string[] =>
@@ -87,10 +89,10 @@ export async function collectArtifacts(conversationId: string, userId?: string):
     })
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  if (!userId) return refs;
+  if (!accessToken) return refs;
   return await Promise.all(refs.map(async (ref) => ({
     ...ref,
-    url: await uploadPending(path.join(ws, ref.path), ref.path, ref.mimeType, userId),
+    url: await uploadPending(path.join(ws, ref.path), ref.path, ref.mimeType, accessToken),
   })));
 }
 

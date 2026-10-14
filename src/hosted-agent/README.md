@@ -62,7 +62,7 @@ deployment-as-worker + unknown role rejected, legitimate step survives.
 |---|---|
 | `session.ts` | `conversation_id` → step ledger as JSON (turns, steps, outputs, usage). Root: `$HOME/session` (sandbox-persistent) else `/tmp/session`. sanitize conversation_id (no path escapes). |
 | planner input | now `PRIOR CONVERSATION:` = last 3 turns with 300-char step outputs |
-| orchestrator | `orchestrate(prompt, conversationId?)`; every turn (incl. rejected plans) recorded |
+| orchestrator | `orchestrate(prompt, conversationId?, security?)`; every turn (incl. rejected plans) recorded; the security object keeps delegated tokens out of positional identity arguments |
 
 **Proven** (`scripts/smoke-chunk2.ts`): turn 2 ("headline from the previous summary")
 inherits turn 1's findings. First pass failed ("No data was provided") — summarizePrior
@@ -128,7 +128,7 @@ package: a fresh `npm i playwright` needs `npx playwright install chromium`
 
 | Module | Role |
 |---|---|
-| `artifacts.ts` | workspace → classified manifest (chart/data/notes/other), pending-file upload to artifact-service (not catalog publication), URL-bearing pending tree; generic turn failure returns this partial manifest |
+| `artifacts.ts` | workspace → classified manifest (chart/data/notes/other), pending-file upload to artifact-service with the user's delegated Entra token (not catalog publication), URL-bearing pending tree; generic turn failure returns this partial manifest. Caller-authored identity/role headers are forbidden. |
 | planner/worker seats | both are real deployments: `gpt-4.1` plans and runs statistician/coder steps; `gpt-4.1-mini` runs reader/operator/routine steps |
 | response contract | `OrchestratorResult.artifacts[]` + pending tree appended to finish text; explicit `persist_artifacts` saves verified taxonomy rows and emits `catalog_updated` for immediate Documents refresh |
 
@@ -150,7 +150,7 @@ indicator_history; (2) let the orchestrator invoke the same
 
 | Module | Role |
 |---|---|
-| artifact-service `POST /refresh-sync` (daemon repo) | server-side bridge: tagged text/csv catalog rows → baked-in `data/series-map.json` allowlist → YYYY-MM normalization → HMAC-signed POST to `$REFRESH_DAEMON_URL/refresh/bootstrap`. Admin-role gated. |
+| artifact-service `POST /refresh-sync` (daemon repo) | server-side bridge: tagged text/csv catalog rows → baked-in `data/series-map.json` allowlist → YYYY-MM normalization → HMAC-signed POST to `$REFRESH_DAEMON_URL/refresh/bootstrap`. Admin-gated by verified Entra app-role/object-id claims. |
 | toolbox `sync_indicator_history` | thin wrapper in the toolbox's CATALOG; only ever sees the SyncReport — the LLM cannot author bytes for the refresh target. Same trust shape as http_proxy's orchestrator tool. The actual gate is server-side at the artifact-service (admin role + HMAC), not in this file. |
 | `agents/operator.md` | system-operator role with catalog limited to `sync_indicator_history`; routes "sync the backbone" prompts. |
 | `scripts/smoke-refresh-sync.ts` | stub artifact-service gate test: dispatch passes dryRun + admin header, non-listed roles rejected, non-OK → sync_failed. |
@@ -250,7 +250,7 @@ read — "upload refresh.db" was the worker's only imagined source. Fixed:
 
 | Layer | Trust |
 |---|---|
-| artifact-service `/refresh-panel` (daemon repo, admin-gated) | read-only open of the SHARED Azure-Files volume (`REFRESH_DB_PATH=/data/refresh.db`). SELECT → deterministic ordering + `sha256` panelHash. The refresh-daemon owns writes; the artifact-service is the only read surface. |
+| artifact-service `/refresh-panel` (daemon repo, Entra-admin-gated) | read-only open of the SHARED Azure-Files volume (`REFRESH_DB_PATH=/data/refresh.db`). SELECT → deterministic ordering + `sha256` panelHash. The refresh-daemon owns writes; the artifact-service is the only read surface. |
 | azure-foundry `read_indicator_panel` verb | forwards subject+series to artifact-service; returns SHAPED summary (series, ranges, obs counts, hash) — never raw rows |
 | agents/statistician + agents/reader | grant the verb; protocol says call it BEFORE execute_python, never say "upload refresh.db" |
 | planner | explicit rule: indicator-panel + statistics → route to statistician |

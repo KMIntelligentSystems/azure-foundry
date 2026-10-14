@@ -2,17 +2,26 @@
   "routes": [
     {
       "route": "/api/*",
-      "methods": ["POST"],
-      "allowedRoles": ["anonymous"]
+      "statusCode": 404
     },
     {
-      "route": "/*",
-      "serve": "/index.html",
-      "statusCode": 200
+      "route": "/.auth/login/aad",
+      "statusCode": 404
+    },
+    {
+      "route": "/.auth/login/github",
+      "statusCode": 404
     }
   ],
   "navigationFallback": {
-    "rewrite": "/index.html"
+    "rewrite": "/index.html",
+    "exclude": ["/api/*", "/.auth/*", "*.{css,js,map,png,jpg,jpeg,gif,svg,ico,woff,woff2}"]
+  },
+  "globalHeaders": {
+    "Content-Security-Policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self' https://login.microsoftonline.com; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://login.microsoftonline.com https://artifact-service.bravesea-f16a8310.eastus.azurecontainerapps.io wss://foundry-orchestrator-gateway.bravesea-f16a8310.eastus.azurecontainerapps.io; frame-src blob:; worker-src 'self' blob:",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "Referrer-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff"
   },
   "platform": {
     "apiRuntime": "node:20"

@@ -51,6 +51,12 @@ export interface DelegationResult {
   error?: string;
 }
 
+export interface DelegationSecurityContext {
+  userId?: string;
+  /** User-delegated token; never expose it to the model or Python child. */
+  accessToken?: string;
+}
+
 export interface DelegationExecutorDependencies {
   stageArtifacts?: DelegationArtifactStager;
   resolveRole?: (name: string) => Role | undefined;
@@ -162,7 +168,7 @@ async function stageSelectedInputs(
 export async function executeDelegation(
   runId: string,
   action: DelegateAction,
-  userId?: string,
+  security: DelegationSecurityContext = {},
   dependencies: DelegationExecutorDependencies = {},
 ): Promise<DelegationResult> {
   const workspaceId = delegationWorkspaceId(runId, action);
@@ -183,14 +189,14 @@ export async function executeDelegation(
       action.task,
       inputManifest(stagedInputs),
       workspaceId,
-      { userId },
+      security,
       1,
       dependencies.modelCaller ?? callLlm,
     );
 
     const after = fingerprints(workspace);
     const changed = changedFiles(baseline, after);
-    const refs = (await collectArtifacts(workspaceId))
+    const refs = (await collectArtifacts(workspaceId, security.accessToken))
       .filter((artifact) => changed.has(artifact.path))
       .map((artifact): DelegationArtifactRef => ({
         ...artifact,
@@ -222,7 +228,7 @@ export async function executeDelegation(
   } catch (error) {
     const after = fingerprints(workspace);
     const changed = changedFiles(baseline, after);
-    const refs = (await collectArtifacts(workspaceId))
+    const refs = (await collectArtifacts(workspaceId, security.accessToken))
       .filter((artifact) => changed.has(artifact.path))
       .map((artifact): DelegationArtifactRef => ({
         ...artifact,
